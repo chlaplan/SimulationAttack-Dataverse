@@ -128,7 +128,7 @@ namespace SimulationAttack_Dataverse
             var clientSecret = Environment.GetEnvironmentVariable("clientSecret", EnvironmentVariableTarget.Process);
             var clientId = Environment.GetEnvironmentVariable("clientId", EnvironmentVariableTarget.Process);
             var TenantId = Environment.GetEnvironmentVariable("TenantId", EnvironmentVariableTarget.Process);
-            var TargetCloud = Environment.GetEnvironmentVariable("AzureEnvironment", EnvironmentVariableTarget.Process);
+            var TargetCloud = Environment.GetEnvironmentVariable("environmentName", EnvironmentVariableTarget.Process);
 
             if (string.IsNullOrEmpty(clientSecret) || string.IsNullOrEmpty(clientId) || string.IsNullOrEmpty(TenantId) || string.IsNullOrEmpty(TargetCloud))
             {
@@ -328,7 +328,7 @@ namespace SimulationAttack_Dataverse
                 // Record does not exist, prepare the entity for creation
                 var entityToCreate = new Entity(CoverageUsersTable)
                 {
-                    ["crfac_simulationcount2"] = user.SimulationCount,
+                    ["crfac_simulationcount"] = user.SimulationCount,
                     ["crfac_latestsimulationdatetime"] = user.LatestSimulationDateTime ?? (DateTime?)null,
                     ["crfac_clickcount"] = user.ClickCount,
                     ["crfac_compromisedcount"] = user.CompromisedCount,
