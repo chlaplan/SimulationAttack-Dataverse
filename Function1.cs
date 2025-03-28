@@ -50,7 +50,7 @@ namespace SimulationAttack_Dataverse
                 string TrainingUserTable = Environment.GetEnvironmentVariable("TrainingUserTable"); // Table for SimulationUsersTable
 
                 // Step 1: Get Microsoft Graph Endpoints
-                var targetCloud = Environment.GetEnvironmentVariable("AzureEnvironment");
+                var targetCloud = Environment.GetEnvironmentVariable("environmentName");
                 string graphBaseUrl;
 
                 switch (targetCloud)
@@ -59,6 +59,9 @@ namespace SimulationAttack_Dataverse
                         graphBaseUrl = "https://dod-graph.microsoft.us/";
                         break;
                     case "AzureGov":
+                        graphBaseUrl = "https://graph.microsoft.us/";
+                        break;
+                    case "GCC":
                         graphBaseUrl = "https://graph.microsoft.us/";
                         break;
                     default:
