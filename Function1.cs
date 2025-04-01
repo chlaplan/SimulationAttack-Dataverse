@@ -13,6 +13,7 @@ using static Grpc.Core.Metadata;
 using Microsoft.PowerPlatform.Dataverse.Client.Extensions;
 using static Microsoft.ApplicationInsights.MetricDimensionNames.TelemetryContext;
 using static SimulationAttack_Dataverse.Function1.UserCoverage;
+using static SimulationAttack_Dataverse.Function1;
 
 namespace SimulationAttack_Dataverse
 {
@@ -98,7 +99,7 @@ namespace SimulationAttack_Dataverse
                     await WriteSimulationToDataverse(serviceClient, simulation, SimulationTable, _logger);
                 }
 
-                // Step 7: Get GetSimulationUsers
+                // Step 7: Get GetSimulationUsers and Write GetSimulationUsers
                 foreach (var simulation in simulations)
                 {
                     var simulationUsersList = await GetSimulationUsers(graphBaseUrl, accessToken, simulation.Id);
@@ -179,6 +180,7 @@ namespace SimulationAttack_Dataverse
                 throw new InvalidOperationException(errorMessage);
             }
         }
+
         private static async Task<List<UserCoverage>> GetAllAttackSimulationUserCoverage(string graphBaseUrl, string accessToken)
         {
             var client = new HttpClient();
@@ -189,26 +191,50 @@ namespace SimulationAttack_Dataverse
 
             do
             {
-                var response = await client.GetStringAsync(nextLink);
-                var userCoverageResponse = JsonConvert.DeserializeObject<UserCoverageResponse>(response);
-
-                // Add the current page of user coverage values to the list
-                allUserCoverage.AddRange(userCoverageResponse.Value);
-
-                // Check for the next page
-                nextLink = userCoverageResponse.NextLink;
-
-                if (nextLink != null)
+                try
                 {
-                    // Wait for 5 seconds before the next request
-                    await Task.Delay(TimeSpan.FromSeconds(5));
+                    Console.WriteLine($"Fetching attack simulation user coverage from: {nextLink}");
+
+                    var response = await client.GetAsync(nextLink);
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        Console.WriteLine($"Error: {response.StatusCode} - {await response.Content.ReadAsStringAsync()}");
+                        break;
+                    }
+
+                    var responseBody = await response.Content.ReadAsStringAsync();
+                    var userCoverageResponse = JsonConvert.DeserializeObject<UserCoverageResponse>(responseBody);
+
+                    if (userCoverageResponse?.Value != null)
+                    {
+                        Console.WriteLine($"Retrieved {userCoverageResponse.Value.Count} user coverage records.");
+                        allUserCoverage.AddRange(userCoverageResponse.Value);
+                    }
+                    else
+                    {
+                        Console.WriteLine("No user coverage records found in the response.");
+                    }
+
+                    // Check for the next page
+                    nextLink = userCoverageResponse?.NextLink;
+
+                    if (!string.IsNullOrEmpty(nextLink))
+                    {
+                        Console.WriteLine($"Next page found: {nextLink}. Waiting 5 seconds...");
+                        await Task.Delay(TimeSpan.FromSeconds(5));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Exception: {ex.Message}");
+                    break;
                 }
 
-            } while (nextLink != null);
+            } while (!string.IsNullOrEmpty(nextLink));
 
+            Console.WriteLine($"Total user coverage records retrieved: {allUserCoverage.Count}");
             return allUserCoverage;
         }
-
         private static async Task<List<TrainingUserCoverage>> GetTrainingUserCoverage(string graphBaseUrl, string accessToken)
         {
             var client = new HttpClient();
@@ -219,34 +245,118 @@ namespace SimulationAttack_Dataverse
 
             do
             {
-                var response = await client.GetStringAsync(nextLink);
-                var TrainingUserCoverageResponse = JsonConvert.DeserializeObject<TrainingUserCoverageResponse>(response);
-
-                // Add the current page of user coverage values to the list
-                allTrainingUserCoverage.AddRange(TrainingUserCoverageResponse.Value);
-
-                // Check for the next page
-                nextLink = TrainingUserCoverageResponse.NextLink;
-
-                if (nextLink != null)
+                try
                 {
-                    // Wait for 5 seconds before the next request
-                    await Task.Delay(TimeSpan.FromSeconds(5));
+                    Console.WriteLine($"Fetching training user coverage from: {nextLink}");
+
+                    var response = await client.GetAsync(nextLink);
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        Console.WriteLine($"Error: {response.StatusCode} - {await response.Content.ReadAsStringAsync()}");
+                        break;
+                    }
+
+                    var responseBody = await response.Content.ReadAsStringAsync();
+                    var trainingUserCoverageResponse = JsonConvert.DeserializeObject<TrainingUserCoverageResponse>(responseBody);
+
+                    if (trainingUserCoverageResponse?.Value != null)
+                    {
+                        Console.WriteLine($"Retrieved {trainingUserCoverageResponse.Value.Count} training user coverage records.");
+                        allTrainingUserCoverage.AddRange(trainingUserCoverageResponse.Value);
+                    }
+                    else
+                    {
+                        Console.WriteLine("No training user coverage data found in the response.");
+                    }
+
+                    // Check for the next page
+                    nextLink = trainingUserCoverageResponse?.NextLink;
+
+                    if (!string.IsNullOrEmpty(nextLink))
+                    {
+                        Console.WriteLine($"Next page found: {nextLink}. Waiting 5 seconds...");
+                        await Task.Delay(TimeSpan.FromSeconds(5));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Exception: {ex.Message}");
+                    break;
                 }
 
-            } while (nextLink != null);
+            } while (!string.IsNullOrEmpty(nextLink));
 
+            Console.WriteLine($"Total training user coverage records retrieved: {allTrainingUserCoverage.Count}");
             return allTrainingUserCoverage;
         }
-
         private static async Task<List<Simulation>> GetSimulations(string graphBaseUrl, string accessToken)
         {
-            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
-            var response = await client.GetStringAsync($"{graphBaseUrl}/v1.0/security/attackSimulation/simulations");
-            var simulations = JsonConvert.DeserializeObject<SimulationResponse>(response);
-            return simulations.Value;
-        }
+            var simulations = new List<Simulation>();
+            string requestUrl = $"{graphBaseUrl}/v1.0/security/attackSimulation/simulations";
 
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+
+            do
+            {
+                try
+                {
+                    Console.WriteLine($"Fetching simulations from: {requestUrl}");
+                    await Console.Out.FlushAsync();
+
+                    var response = await client.GetAsync(requestUrl);
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        Console.WriteLine($"Error: {response.StatusCode} - {await response.Content.ReadAsStringAsync()}");
+                        await Console.Out.FlushAsync();
+                        break;
+                    }
+
+                    var responseBody = await response.Content.ReadAsStringAsync();
+                    Console.WriteLine($"Raw JSON Response: {responseBody}"); // Debugging line
+                    await Console.Out.FlushAsync();
+
+                    var simulationResponse = JsonConvert.DeserializeObject<SimulationResponse>(responseBody);
+
+                    if (simulationResponse?.Value != null)
+                    {
+                        Console.WriteLine($"Retrieved {simulationResponse.Value.Count} simulations.");
+                        await Console.Out.FlushAsync();
+                        simulations.AddRange(simulationResponse.Value);
+                    }
+                    else
+                    {
+                        Console.WriteLine("No simulations found in the response.");
+                        await Console.Out.FlushAsync();
+                    }
+
+                    // Check for pagination link
+                    requestUrl = simulationResponse?.NextLink;
+
+                    if (!string.IsNullOrEmpty(requestUrl))
+                    {
+                        Console.WriteLine($"Next page found: {requestUrl}. Waiting 5 seconds...");
+                        await Console.Out.FlushAsync();
+                        await Task.Delay(TimeSpan.FromSeconds(5));
+                    }
+                    else
+                    {
+                        Console.WriteLine("No next page found, ending pagination.");
+                        await Console.Out.FlushAsync();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Exception: {ex.Message}");
+                    await Console.Out.FlushAsync();
+                    break;
+                }
+
+            } while (!string.IsNullOrEmpty(requestUrl));
+
+            Console.WriteLine($"Total simulations retrieved: {simulations.Count}");
+            await Console.Out.FlushAsync();
+            return simulations;
+        }
         private static async Task<List<SimulationUsers>> GetSimulationUsers(string graphBaseUrl, string accessToken, string id)
         {
             client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
@@ -255,30 +365,50 @@ namespace SimulationAttack_Dataverse
 
             do
             {
-                // Make the HTTP request to get simulation users
-                var response = await client.GetStringAsync(nextLink);
-                var simulationUsersResponse = JsonConvert.DeserializeObject<SimulationUsersResponse>(response);
-
-                // Add the current page of user data to the list
-                allSimulationUsers.AddRange(simulationUsersResponse.Value);
-
-                // Check for the next page
-                nextLink = simulationUsersResponse.NextLink; // Match this to the actual JSON property name
-
-                // Log page retrieval (optional)
-                Console.WriteLine($"Retrieved page with {simulationUsersResponse.Value.Count} records.");
-
-                if (nextLink != null)
+                try
                 {
-                    // Wait for 5 seconds before the next request to avoid throttling
-                    await Task.Delay(TimeSpan.FromSeconds(5));
+                    Console.WriteLine($"Fetching simulation users from: {nextLink}");
+
+                    var response = await client.GetAsync(nextLink);
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        Console.WriteLine($"Error: {response.StatusCode} - {await response.Content.ReadAsStringAsync()}");
+                        break;
+                    }
+
+                    var responseBody = await response.Content.ReadAsStringAsync();
+                    var simulationUsersResponse = JsonConvert.DeserializeObject<SimulationUsersResponse>(responseBody);
+
+                    if (simulationUsersResponse?.Value != null)
+                    {
+                        Console.WriteLine($"Retrieved {simulationUsersResponse.Value.Count} simulation user records.");
+                        allSimulationUsers.AddRange(simulationUsersResponse.Value);
+                    }
+                    else
+                    {
+                        Console.WriteLine("No simulation users found in the response.");
+                    }
+
+                    // Check for the next page
+                    nextLink = simulationUsersResponse?.NextLink;
+
+                    if (!string.IsNullOrEmpty(nextLink))
+                    {
+                        Console.WriteLine($"Next page found: {nextLink}. Waiting 5 seconds...");
+                        await Task.Delay(TimeSpan.FromSeconds(5));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Exception: {ex.Message}");
+                    break;
                 }
 
-            } while (nextLink != null);
+            } while (!string.IsNullOrEmpty(nextLink));
 
+            Console.WriteLine($"Total simulation user records retrieved: {allSimulationUsers.Count}");
             return allSimulationUsers;
         }
-
 
         private static async Task<Entity> RetrieveExistingRecord(ServiceClient serviceClient, string tableName, string fieldName, string fieldValue)
         {
@@ -304,7 +434,8 @@ namespace SimulationAttack_Dataverse
             // logger.LogInformation($"Checking for existing record in {CoverageUsersTable} where crfac_attacksimulationuser = {JsonConvert.SerializeObject(user.AttackSimulationUser.UserId)}");
 
             // Retrieve the existing record
-            var existingRecord = await RetrieveExistingRecord(serviceClient, CoverageUsersTable, "crfac_attacksimulationuser", JsonConvert.SerializeObject(user.AttackSimulationUser));
+            var tableprefix = Environment.GetEnvironmentVariable("tableprefix", EnvironmentVariableTarget.Process);
+            var existingRecord = await RetrieveExistingRecord(serviceClient, CoverageUsersTable, ($"{tableprefix}_attacksimulationuser"), JsonConvert.SerializeObject(user.AttackSimulationUser));
 
             if (existingRecord != null)
             {
@@ -312,11 +443,11 @@ namespace SimulationAttack_Dataverse
                 var entityToUpdate = new Entity(CoverageUsersTable)
                 {
                     Id = existingRecord.Id, // Set the ID of the existing record
-                    ["crfac_simulationcount"] = user.SimulationCount,
-                    ["crfac_latestsimulationdatetime"] = user.LatestSimulationDateTime ?? (DateTime?)null,
-                    ["crfac_clickcount"] = user.ClickCount,
-                    ["crfac_compromisedcount"] = user.CompromisedCount,
-                    ["crfac_attacksimulationuser"] = JsonConvert.SerializeObject(user.AttackSimulationUser),
+                    [($"{tableprefix}_simulationcount")] = user.SimulationCount,
+                    [($"{tableprefix}_latestsimulationdatetime")] = user.LatestSimulationDateTime ?? (DateTime?)null,
+                    [($"{tableprefix}_clickcount")] = user.ClickCount,
+                    [($"{tableprefix}_compromisedcount")] = user.CompromisedCount,
+                    [($"{tableprefix}_attacksimulationuser")] = JsonConvert.SerializeObject(user.AttackSimulationUser),
                 };
 
                 // Perform the update
@@ -328,11 +459,11 @@ namespace SimulationAttack_Dataverse
                 // Record does not exist, prepare the entity for creation
                 var entityToCreate = new Entity(CoverageUsersTable)
                 {
-                    ["crfac_simulationcount"] = user.SimulationCount,
-                    ["crfac_latestsimulationdatetime"] = user.LatestSimulationDateTime ?? (DateTime?)null,
-                    ["crfac_clickcount"] = user.ClickCount,
-                    ["crfac_compromisedcount"] = user.CompromisedCount,
-                    ["crfac_attacksimulationuser"] = JsonConvert.SerializeObject(user.AttackSimulationUser),
+                    [($"{tableprefix}_simulationcount")] = user.SimulationCount,
+                    [($"{tableprefix}_latestsimulationdatetime")] = user.LatestSimulationDateTime ?? (DateTime?)null,
+                    [($"{tableprefix}_clickcount")] = user.ClickCount,
+                    [($"{tableprefix}_compromisedcount")] = user.CompromisedCount,
+                    [($"{tableprefix}_attacksimulationuser")] = JsonConvert.SerializeObject(user.AttackSimulationUser),
                 };
 
                 // Perform the create operation
@@ -340,9 +471,9 @@ namespace SimulationAttack_Dataverse
                 logger.LogInformation($"Created new user coverage record for {user.AttackSimulationUser.UserId}");
             }
         }
-
         private static async Task WriteSimulationToDataverse(ServiceClient serviceClient, Simulation simulation, string SimulationTable, ILogger _logger)
         {
+            var tableprefix = Environment.GetEnvironmentVariable("tableprefix", EnvironmentVariableTarget.Process);
             // Log the table name for verification
             _logger.LogInformation($"Writing to Dataverse table: {SimulationTable}");
 
@@ -352,52 +483,52 @@ namespace SimulationAttack_Dataverse
                 if (Guid.TryParse(simulation.Id, out Guid simulationId))
                 {
                     // Attempt to retrieve the existing record
-                    var existingRecord = await RetrieveExistingRecord(serviceClient, SimulationTable, "crfac_id", simulation.Id);
+                    var existingRecord = await RetrieveExistingRecord(serviceClient, SimulationTable, ($"{tableprefix}_id"), simulation.Id);
 
                     // Create the entity to be created or updated
                     var entity = new Entity(SimulationTable);
 
                     // Set the common fields
-                    entity["crfac_id"] = simulation.Id;
-                    entity["crfac_displayname"] = simulation.DisplayName;
-                    entity["crfac_description"] = simulation.Description;
-                    entity["crfac_attacktype"] = simulation.AttackType;
-                    entity["crfac_payloaddeliveryplatform"] = simulation.PayloadDeliveryPlatform;
-                    entity["crfac_attacktechnique"] = simulation.AttackTechnique;
-                    entity["crfac_status"] = simulation.Status;
-                    entity["crfac_createddatetime"] = simulation.CreatedDateTime;
-                    entity["crfac_lastmodifieddatetime"] = simulation.LastModifiedDateTime;
-                    entity["crfac_launchdatetime"] = simulation.LaunchDateTime;
-                    entity["crfac_completiondatetime"] = simulation.CompletionDateTime;
-                    entity["crfac_isautomated"] = simulation.IsAutomated;
-                    entity["crfac_automationid"] = simulation.AutomationId;
-                    entity["crfac_durationindays"] = simulation.DurationInDays;
-                    entity["crfac_trainingsetting"] = simulation.TrainingSetting;
-                    entity["crfac_oauthconsentappdetail"] = simulation.OAuthConsentAppDetail;
-                    entity["crfac_endusernotificationsetting"] = simulation.EndUserNotificationSetting;
-                    entity["crfac_includedaccounttarget"] = simulation.IncludedAccountTarget;
-                    entity["crfac_excludedaccounttarget"] = simulation.ExcludedAccountTarget;
+                    entity[($"{tableprefix}_id")] = simulation.Id;
+                    entity[($"{tableprefix}_displayname")] = simulation.DisplayName;
+                    entity[($"{tableprefix}_description")] = simulation.Description;
+                    entity[($"{tableprefix}_attacktype")] = simulation.AttackType;
+                    entity[($"{tableprefix}_payloaddeliveryplatform")] = simulation.PayloadDeliveryPlatform;
+                    entity[($"{tableprefix}_attacktechnique")] = simulation.AttackTechnique;
+                    entity[($"{tableprefix}_status")] = simulation.Status;
+                    entity[($"{tableprefix}_createddatetime")] = simulation.CreatedDateTime;
+                    entity[($"{tableprefix}_lastmodifieddatetime")] = simulation.LastModifiedDateTime;
+                    entity[($"{tableprefix}_launchdatetime")] = simulation.LaunchDateTime;
+                    entity[($"{tableprefix}_completiondatetime")] = simulation.CompletionDateTime;
+                    entity[($"{tableprefix}_isautomated")] = simulation.IsAutomated;
+                    entity[($"{tableprefix}_automationid")] = simulation.AutomationId;
+                    entity[($"{tableprefix}_durationindays")] = simulation.DurationInDays;
+                    entity[($"{tableprefix}_trainingsetting")] = simulation.TrainingSetting;
+                    entity[($"{tableprefix}_oauthconsentappdetail")] = simulation.OAuthConsentAppDetail;
+                    entity[($"{tableprefix}_endusernotificationsetting")] = simulation.EndUserNotificationSetting;
+                    entity[($"{tableprefix}_includedaccounttarget")] = simulation.IncludedAccountTarget;
+                    entity[($"{tableprefix}_excludedaccounttarget")] = simulation.ExcludedAccountTarget;
                     try
                     {
-                        _logger.LogInformation($"Setting attribute 'crfac_createdby': Value type is {simulation.CreatedBy?.GetType()}");
-                        entity["crfac_createdby"] = simulation.CreatedBy != null
+                        _logger.LogInformation($"Setting attribute createdby : Value type is {simulation.CreatedBy?.GetType()}");
+                        entity[($"{tableprefix}_createdby")] = simulation.CreatedBy != null
                             ? $"email={simulation.CreatedBy.Email ?? "N/A"}; id={simulation.CreatedBy.Id ?? "N/A"}; displayName={simulation.CreatedBy.DisplayName ?? "N/A"}"
                             : "N/A";
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogError($"Error setting 'crfac_createdby': {ex.Message}");
+                        _logger.LogError($"Error setting 'createdby': {ex.Message}");
                     }
                     try
                     {
-                        _logger.LogInformation($"Setting attribute 'crfac_lastmodifiedby': Value type is {simulation.LastModifiedBy?.GetType()}");
-                        entity["crfac_lastmodifiedby"] = simulation.LastModifiedBy != null
+                        _logger.LogInformation($"Setting attribute 'lastmodifiedby': Value type is {simulation.LastModifiedBy?.GetType()}");
+                        entity[($"{tableprefix}_lastmodifiedby")] = simulation.LastModifiedBy != null
                             ? $"email={simulation.LastModifiedBy.Email ?? "N/A"}; id={simulation.LastModifiedBy.Id ?? "N/A"}; displayName={simulation.LastModifiedBy.DisplayName ?? "N/A"}"
                             : "N/A";
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogError($"Error setting 'crfac_lastmodifiedby': {ex.Message}");
+                        _logger.LogError($"Error setting 'lastmodifiedby': {ex.Message}");
                     }
 
 
@@ -425,12 +556,11 @@ namespace SimulationAttack_Dataverse
                 throw new Exception($"Error writing to Dataverse: {ex.Message}");
             }
         }
-
         private static async Task WriteSimulationUsersToDataverse(ServiceClient serviceClient, SimulationUsers SimulationUsers, string SimulationUsersTable, ILogger logger)
         {
-
+            var tableprefix = Environment.GetEnvironmentVariable("tableprefix", EnvironmentVariableTarget.Process);
             // Retrieve the existing record
-            var existingRecord = await RetrieveExistingRecord(serviceClient, SimulationUsersTable, "crfac_simulationuser", JsonConvert.SerializeObject(SimulationUsers.simulationUser));
+            var existingRecord = await RetrieveExistingRecord(serviceClient, SimulationUsersTable, ($"{tableprefix}_simulationuser"), JsonConvert.SerializeObject(SimulationUsers.simulationUser));
 
             if (existingRecord != null)
             {
@@ -438,14 +568,14 @@ namespace SimulationAttack_Dataverse
                 var entityToUpdate = new Entity(SimulationUsersTable)
                 {
                     Id = existingRecord.Id, // Set the ID of the existing record
-                    ["crfac_iscompromised"] = SimulationUsers.isCompromised,
-                    ["crfac_compromiseddatetime"] = SimulationUsers.compromisedDateTime ?? (DateTime?)null,
-                    ["crfac_assignedtrainingscount"] = SimulationUsers.assignedTrainingsCount,
-                    ["crfac_completedtrainingscount"] = SimulationUsers.completedTrainingsCount,
-                    ["crfac_inprogresstrainingscount"] = SimulationUsers.inProgressTrainingsCount,
-                    ["crfac_reportedphishdatetime"] = SimulationUsers.reportedPhishDateTime ?? (DateTime?)null,
-                    ["crfac_simulationuser"] = JsonConvert.SerializeObject(SimulationUsers.simulationUser),
-                    ["crfac_simulationevents"] = JsonConvert.SerializeObject(SimulationUsers.SimulationEvents),
+                    [($"{tableprefix}_iscompromised")] = SimulationUsers.isCompromised,
+                    [($"{tableprefix}_compromiseddatetime")] = SimulationUsers.compromisedDateTime ?? (DateTime?)null,
+                    [($"{tableprefix}_assignedtrainingscount")] = SimulationUsers.assignedTrainingsCount,
+                    [($"{tableprefix}_completedtrainingscount")] = SimulationUsers.completedTrainingsCount,
+                    [($"{tableprefix}_inprogresstrainingscount")] = SimulationUsers.inProgressTrainingsCount,
+                    [($"{tableprefix}_reportedphishdatetime")] = SimulationUsers.reportedPhishDateTime ?? (DateTime?)null,
+                    [($"{tableprefix}_simulationuser")] = JsonConvert.SerializeObject(SimulationUsers.simulationUser),
+                    [($"{tableprefix}_simulationevents")] = JsonConvert.SerializeObject(SimulationUsers.SimulationEvents),
                 };
 
                 // Perform the update
@@ -457,14 +587,14 @@ namespace SimulationAttack_Dataverse
                 // Record does not exist, prepare the entity for creation
                 var entityToCreate = new Entity(SimulationUsersTable)
                 {
-                    ["crfac_iscompromised"] = SimulationUsers.isCompromised,
-                    ["crfac_compromiseddatetime"] = SimulationUsers.compromisedDateTime ?? (DateTime?)null,
-                    ["crfac_assignedtrainingscount"] = SimulationUsers.assignedTrainingsCount,
-                    ["crfac_completedtrainingscount"] = SimulationUsers.completedTrainingsCount,
-                    ["crfac_inprogresstrainingscount"] = SimulationUsers.inProgressTrainingsCount,
-                    ["crfac_reportedphishdatetime"] = SimulationUsers.reportedPhishDateTime ?? (DateTime?)null,
-                    ["crfac_simulationuser"] = JsonConvert.SerializeObject(SimulationUsers.simulationUser),
-                    ["crfac_simulationevents"] = JsonConvert.SerializeObject(SimulationUsers.SimulationEvents),
+                    [($"{tableprefix}_iscompromised")] = SimulationUsers.isCompromised,
+                    [($"{tableprefix}_compromiseddatetime")] = SimulationUsers.compromisedDateTime ?? (DateTime?)null,
+                    [($"{tableprefix}_assignedtrainingscount")] = SimulationUsers.assignedTrainingsCount,
+                    [($"{tableprefix}_completedtrainingscount")] = SimulationUsers.completedTrainingsCount,
+                    [($"{tableprefix}_inprogresstrainingscount")] = SimulationUsers.inProgressTrainingsCount,
+                    [($"{tableprefix}_reportedphishdatetime")] = SimulationUsers.reportedPhishDateTime ?? (DateTime?)null,
+                    [($"{tableprefix}_simulationuser")] = JsonConvert.SerializeObject(SimulationUsers.simulationUser),
+                    [($"{tableprefix}_simulationevents")] = JsonConvert.SerializeObject(SimulationUsers.SimulationEvents),
                 };
 
                 // Perform the create operation
@@ -472,12 +602,11 @@ namespace SimulationAttack_Dataverse
                 logger.LogInformation($"Created new user SimulationUsers record for {SimulationUsers.simulationUser.UserId}");
             }
         }
-
         private static async Task WriteTrainingUserCoverageToDataverse(ServiceClient serviceClient, TrainingUserCoverage TrainingUsers, string SimulationUsersTable, ILogger logger)
         {
-
+            var tableprefix = Environment.GetEnvironmentVariable("tableprefix", EnvironmentVariableTarget.Process);
             // Retrieve the existing record
-            var existingRecord = await RetrieveExistingRecord(serviceClient, SimulationUsersTable, "crfac_attacksimulationuser", JsonConvert.SerializeObject(TrainingUsers.attackSimulationUser));
+            var existingRecord = await RetrieveExistingRecord(serviceClient, SimulationUsersTable, ($"{tableprefix}_attacksimulationuser"), JsonConvert.SerializeObject(TrainingUsers.attackSimulationUser));
 
             if (existingRecord != null)
             {
@@ -485,8 +614,8 @@ namespace SimulationAttack_Dataverse
                 var entityToUpdate = new Entity(SimulationUsersTable)
                 {
                     Id = existingRecord.Id, // Set the ID of the existing record
-                    ["crfac_usertrainings"] = JsonConvert.SerializeObject(TrainingUsers.userTrainings),
-                    ["crfac_attacksimulationuser"] = JsonConvert.SerializeObject(TrainingUsers.attackSimulationUser),
+                    [($"{tableprefix}_usertrainings")] = JsonConvert.SerializeObject(TrainingUsers.userTrainings),
+                    [($"{tableprefix}_attacksimulationuser")] = JsonConvert.SerializeObject(TrainingUsers.attackSimulationUser),
                 };
 
                 // Perform the update
@@ -498,8 +627,8 @@ namespace SimulationAttack_Dataverse
                 // Record does not exist, prepare the entity for creation
                 var entityToCreate = new Entity(SimulationUsersTable)
                 {
-                    ["crfac_usertrainings"] = JsonConvert.SerializeObject(TrainingUsers.userTrainings),
-                    ["crfac_attacksimulationuser"] = JsonConvert.SerializeObject(TrainingUsers.attackSimulationUser),
+                    [($"{tableprefix}_usertrainings")] = JsonConvert.SerializeObject(TrainingUsers.userTrainings),
+                    [($"{tableprefix}_attacksimulationuser")] = JsonConvert.SerializeObject(TrainingUsers.attackSimulationUser),
                 };
 
                 // Perform the create operation
@@ -511,24 +640,37 @@ namespace SimulationAttack_Dataverse
 
         public class SimulationResponse
         {
+            [JsonProperty("value")]
             public List<Simulation> Value { get; set; }
+
+            [JsonProperty("@odata.nextLink")]
+            public string NextLink { get; set; }
         }
 
         public class UserCoverageResponse
         {
+            [JsonProperty("value")]
             public List<UserCoverage> Value { get; set; }
+
+            [JsonProperty("@odata.nextLink")]
             public string NextLink { get; set; }
         }
 
         public class TrainingUserCoverageResponse
         {
+            [JsonProperty("value")]
             public List<TrainingUserCoverage> Value { get; set; }
+
+            [JsonProperty("@odata.nextLink")]
             public string NextLink { get; set; }
         }
 
         public class SimulationUsersResponse
         {
+            [JsonProperty("value")]
             public List<SimulationUsers> Value { get; set; }
+
+            [JsonProperty("@odata.nextLink")]
             public string NextLink { get; set; }
         }
 
