@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -77,7 +77,7 @@ namespace SimulationAttack_Dataverse
                 var simulations = await GetSimulations(graphBaseUrl, accessToken, _logger);
 
                 // Step 4: Fetch user coverage data
-                var userCoverage = await GetAllAttackSimulationUserCoverage(graphBaseUrl, accessToken, _logger);
+                var userCoverage = await GetAllAttackSimulationUserCoverage(graphBaseUrl, accessToken);
 
                 // Making Connection to Dataverse
                 var dataverseConnection = Environment.GetEnvironmentVariable("DataverseConnection");
@@ -89,9 +89,9 @@ namespace SimulationAttack_Dataverse
 
                 // Step 5: Write coverage data to Dataverse
                 foreach (var user in userCoverage)
-                {
+                 {
                     await WriteUserCoverageToDataverse(serviceClient, user, CoverageUsersTable, _logger);
-                }
+                 }
 
                 // Step 6: Write simulations to Dataverse
                 foreach (var simulation in simulations)
@@ -181,7 +181,7 @@ namespace SimulationAttack_Dataverse
             }
         }
 
-        private static async Task<List<UserCoverage>> GetAllAttackSimulationUserCoverage(string graphBaseUrl, string accessToken, ILogger _logger)
+        private static async Task<List<UserCoverage>> GetAllAttackSimulationUserCoverage(string graphBaseUrl, string accessToken)
         {
             var client = new HttpClient();
             client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
@@ -193,12 +193,12 @@ namespace SimulationAttack_Dataverse
             {
                 try
                 {
-                    _logger.LogInformation($"Fetching simulations from: {nextLink}");
+                    Console.WriteLine($"Fetching attack simulation user coverage from: {nextLink}");
 
                     var response = await client.GetAsync(nextLink);
                     if (!response.IsSuccessStatusCode)
                     {
-                        _logger.LogError($"Error: {response.StatusCode} - {await response.Content.ReadAsStringAsync()}");
+                        Console.WriteLine($"Error: {response.StatusCode} - {await response.Content.ReadAsStringAsync()}");
                         break;
                     }
 
@@ -207,12 +207,12 @@ namespace SimulationAttack_Dataverse
 
                     if (userCoverageResponse?.Value != null)
                     {
-                        _logger.LogInformation($"Retrieved {userCoverageResponse.Value.Count} simulations.");
+                        Console.WriteLine($"Retrieved {userCoverageResponse.Value.Count} user coverage records.");
                         allUserCoverage.AddRange(userCoverageResponse.Value);
                     }
                     else
                     {
-                        _logger.LogWarning("No simulations found in the response.");
+                        Console.WriteLine("No user coverage records found in the response.");
                     }
 
                     // Check for the next page
@@ -220,19 +220,19 @@ namespace SimulationAttack_Dataverse
 
                     if (!string.IsNullOrEmpty(nextLink))
                     {
-                        _logger.LogInformation($"Next page found: {nextLink}. Waiting 5 seconds...");
+                        Console.WriteLine($"Next page found: {nextLink}. Waiting 5 seconds...");
                         await Task.Delay(TimeSpan.FromSeconds(5));
                     }
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError($"Exception: {ex.Message}");
+                    Console.WriteLine($"Exception: {ex.Message}");
                     break;
                 }
 
             } while (!string.IsNullOrEmpty(nextLink));
 
-            _logger.LogInformation($"Total simulations retrieved: {allUserCoverage.Count}");
+            Console.WriteLine($"Total user coverage records retrieved: {allUserCoverage.Count}");
             return allUserCoverage;
         }
         private static async Task<List<TrainingUserCoverage>> GetTrainingUserCoverage(string graphBaseUrl, string accessToken)
@@ -692,7 +692,7 @@ namespace SimulationAttack_Dataverse
 
             public class attackSimulationUserDetails
             {
-                public string UserId { get; set; }
+                public string UserId { get; set; } 
                 public string DisplayName { get; set; }
                 public string Email { get; set; }
             }
