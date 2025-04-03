@@ -14,12 +14,16 @@ using Microsoft.PowerPlatform.Dataverse.Client.Extensions;
 using static Microsoft.ApplicationInsights.MetricDimensionNames.TelemetryContext;
 using static SimulationAttack_Dataverse.Function1.UserCoverage;
 using static SimulationAttack_Dataverse.Function1;
+using System.Net;
+using Azure.Core;
 
 namespace SimulationAttack_Dataverse
 {
     public class Function1
     {
         private readonly ILogger _logger;
+        private static string _accessToken = string.Empty;
+        private static DateTime _tokenExpiryTime = DateTime.UtcNow;
         private static readonly HttpClient client = new HttpClient();
         private static readonly HttpClient _httpClient = new HttpClient();
 
@@ -40,8 +44,8 @@ namespace SimulationAttack_Dataverse
 
             try
             {
-                string tenantId = Environment.GetEnvironmentVariable("TenantID");
-                string clientId = Environment.GetEnvironmentVariable("ClientID");
+                string tenantId = Environment.GetEnvironmentVariable("TenantId");
+                string clientId = Environment.GetEnvironmentVariable("ClientId");
                 string clientSecret = Environment.GetEnvironmentVariable("ClientSecret");
                 string environmentName = Environment.GetEnvironmentVariable("EnvironmentName") ?? "Global";
                 string DataverseConnection = Environment.GetEnvironmentVariable("DataverseConnection");
@@ -51,7 +55,7 @@ namespace SimulationAttack_Dataverse
                 string TrainingUserTable = Environment.GetEnvironmentVariable("TrainingUserTable"); // Table for SimulationUsersTable
 
                 // Step 1: Get Microsoft Graph Endpoints
-                var targetCloud = Environment.GetEnvironmentVariable("environmentName");
+                var targetCloud = Environment.GetEnvironmentVariable("EnvironmentName");
                 string graphBaseUrl;
 
                 switch (targetCloud)
@@ -73,12 +77,6 @@ namespace SimulationAttack_Dataverse
                 // Step 2: Get access token for Microsoft Graph
                 var accessToken = await GetAccessToken(graphBaseUrl, _logger);
 
-                // Step 3: Fetch simulations
-                var simulations = await GetSimulations(graphBaseUrl, accessToken, _logger);
-
-                // Step 4: Fetch user coverage data
-                var userCoverage = await GetAllAttackSimulationUserCoverage(graphBaseUrl, accessToken, _logger);
-
                 // Making Connection to Dataverse
                 var dataverseConnection = Environment.GetEnvironmentVariable("DataverseConnection");
                 if (string.IsNullOrEmpty(dataverseConnection))
@@ -87,36 +85,41 @@ namespace SimulationAttack_Dataverse
                 }
                 var serviceClient = new ServiceClient(dataverseConnection);
 
-                // Step 5: Write coverage data to Dataverse
-                foreach (var user in userCoverage)
-                {
-                    await WriteUserCoverageToDataverse(serviceClient, user, CoverageUsersTable, _logger);
-                }
+                // Step 3: Fetch simulations
+                var simulations = await GetSimulations(graphBaseUrl, accessToken, _logger);
 
-                // Step 6: Write simulations to Dataverse
+                // Step 4: Write simulations to Dataverse
                 foreach (var simulation in simulations)
                 {
                     await WriteSimulationToDataverse(serviceClient, simulation, SimulationTable, _logger);
                 }
 
-                // Step 7: Get GetSimulationUsers and Write GetSimulationUsers
-                foreach (var simulation in simulations)
-                {
-                    var simulationUsersList = await GetSimulationUsers(graphBaseUrl, accessToken, simulation.Id);
-                    foreach (var user in simulationUsersList)
-                    {
-                        await WriteSimulationUsersToDataverse(serviceClient, user, SimulationUsersTable, _logger);
-                    }
-                }
-
-                // Step 8: Fetch TrainingUserCoverage data
+                // Step 5: Fetch TrainingUserCoverage data
                 var TrainingUserCoverage = await GetTrainingUserCoverage(graphBaseUrl, accessToken);
 
-                // Step 9: Write TrainingUserCoverage to Dataverse
+                // Step 6: Write TrainingUserCoverage to Dataverse
                 foreach (var TrainingUsers in TrainingUserCoverage)
                 {
                     await WriteTrainingUserCoverageToDataverse(serviceClient, TrainingUsers, TrainingUserTable, _logger);
                 }
+
+                // Step 7: Get GetSimulationUsers and Write GetSimulationUsers - Long Process
+                foreach (var simulation in simulations)
+                {
+                    var simulationUsersList = await GetSimulationUsers(graphBaseUrl, accessToken, simulation.Id, _logger);
+                    foreach (var user in simulationUsersList)
+                    {
+                        await WriteSimulationUsersToDataverse(serviceClient, user, SimulationUsersTable, simulation.Id, _logger);
+                    }
+                }
+
+                // Step 8: Fetch user coverage data - Long Process 
+                //var userCoverage = await GetAllAttackSimulationUserCoverage(graphBaseUrl, _logger);
+
+                // Step 9: Write coverage data to Dataverse - Long Process
+                //var writeTasks = userCoverage.Select(user => WriteUserCoverageToDataverse(serviceClient, user, CoverageUsersTable, _logger));
+                //await Task.WhenAll(writeTasks);
+
             }
             catch (Exception ex)
             {
@@ -126,10 +129,17 @@ namespace SimulationAttack_Dataverse
 
         private static async Task<string> GetAccessToken(string uri, ILogger logger)
         {
-            var clientSecret = Environment.GetEnvironmentVariable("clientSecret", EnvironmentVariableTarget.Process);
-            var clientId = Environment.GetEnvironmentVariable("clientId", EnvironmentVariableTarget.Process);
+            // If token is still valid, return it
+            if (!string.IsNullOrEmpty(_accessToken) && DateTime.UtcNow < _tokenExpiryTime)
+            {
+                return _accessToken;
+            }
+
+            // Fetch new token
+            var clientSecret = Environment.GetEnvironmentVariable("ClientSecret", EnvironmentVariableTarget.Process);
+            var clientId = Environment.GetEnvironmentVariable("ClientId", EnvironmentVariableTarget.Process);
             var TenantId = Environment.GetEnvironmentVariable("TenantId", EnvironmentVariableTarget.Process);
-            var TargetCloud = Environment.GetEnvironmentVariable("environmentName", EnvironmentVariableTarget.Process);
+            var TargetCloud = Environment.GetEnvironmentVariable("EnvironmentName", EnvironmentVariableTarget.Process);
 
             if (string.IsNullOrEmpty(clientSecret) || string.IsNullOrEmpty(clientId) || string.IsNullOrEmpty(TenantId) || string.IsNullOrEmpty(TargetCloud))
             {
@@ -150,20 +160,18 @@ namespace SimulationAttack_Dataverse
 
             var tokenRequestContent = new[]
             {
-                new KeyValuePair<string, string>("grant_type", "client_credentials"),
-                new KeyValuePair<string, string>("client_id", clientId),
-                new KeyValuePair<string, string>("client_secret", clientSecret),
-                new KeyValuePair<string, string>("resource", uri)
-            };
+        new KeyValuePair<string, string>("grant_type", "client_credentials"),
+        new KeyValuePair<string, string>("client_id", clientId),
+        new KeyValuePair<string, string>("client_secret", clientSecret),
+        new KeyValuePair<string, string>("resource", uri)
+    };
 
             var tokenRequest = new HttpRequestMessage(HttpMethod.Post, tokenUri)
             {
                 Content = new FormUrlEncodedContent(tokenRequestContent)
             };
 
-            // Log the full request details, used for troublshooting
-            logger.LogInformation($"Token request URI: {tokenUri}");
-            logger.LogInformation($"Token request content: {string.Join(", ", tokenRequestContent.Select(kvp => $"{kvp.Key}={kvp.Value}"))}");
+            logger.LogInformation($"Requesting new access token from: {tokenUri}");
 
             try
             {
@@ -171,31 +179,36 @@ namespace SimulationAttack_Dataverse
                 tokenResponse.EnsureSuccessStatusCode();
                 var tokenContent = await tokenResponse.Content.ReadAsStringAsync();
                 var tokenData = JsonConvert.DeserializeObject<dynamic>(tokenContent);
-                return tokenData.access_token;
+
+                _accessToken = tokenData.access_token;
+                int expiresIn = tokenData.expires_in; // Token expiration in seconds
+                _tokenExpiryTime = DateTime.UtcNow.AddSeconds(expiresIn - 60); // Refresh 1 min before expiry
+
+                logger.LogInformation($"New access token acquired, expires in {expiresIn} seconds.");
+
+                return _accessToken;
             }
             catch (Exception ex)
             {
-                var errorMessage = $"Error getting access token for URI {tokenUri}: {ex.Message}";
+                var errorMessage = $"Error getting access token from {tokenUri}: {ex.Message}";
                 logger.LogError(errorMessage);
                 throw new InvalidOperationException(errorMessage);
             }
         }
-
-        private static async Task<List<UserCoverage>> GetAllAttackSimulationUserCoverage(string graphBaseUrl, string accessToken, ILogger _logger)
+        private static async Task<List<Simulation>> GetSimulations(string graphBaseUrl, string accessToken, ILogger _logger)
         {
-            var client = new HttpClient();
-            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+            var simulations = new List<Simulation>();
+            string requestUrl = $"{graphBaseUrl}/v1.0/security/attackSimulation/simulations";
 
-            var allUserCoverage = new List<UserCoverage>();
-            string nextLink = $"{graphBaseUrl}/v1.0/reports/security/getAttackSimulationSimulationUserCoverage";
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
 
             do
             {
                 try
                 {
-                    _logger.LogInformation($"Fetching simulations from: {nextLink}");
+                    //_logger.LogInformation($"Fetching simulations from: {requestUrl}");
 
-                    var response = await client.GetAsync(nextLink);
+                    var response = await client.GetAsync(requestUrl);
                     if (!response.IsSuccessStatusCode)
                     {
                         _logger.LogError($"Error: {response.StatusCode} - {await response.Content.ReadAsStringAsync()}");
@@ -203,25 +216,25 @@ namespace SimulationAttack_Dataverse
                     }
 
                     var responseBody = await response.Content.ReadAsStringAsync();
-                    var userCoverageResponse = JsonConvert.DeserializeObject<UserCoverageResponse>(responseBody);
+                    var simulationResponse = JsonConvert.DeserializeObject<SimulationResponse>(responseBody);
 
-                    if (userCoverageResponse?.Value != null)
+                    if (simulationResponse?.Value != null)
                     {
-                        _logger.LogInformation($"Retrieved {userCoverageResponse.Value.Count} simulations.");
-                        allUserCoverage.AddRange(userCoverageResponse.Value);
+                        //_logger.LogInformation($"Retrieved {simulationResponse.Value.Count} simulations.");
+                        simulations.AddRange(simulationResponse.Value);
                     }
                     else
                     {
                         _logger.LogWarning("No simulations found in the response.");
                     }
 
-                    // Check for the next page
-                    nextLink = userCoverageResponse?.NextLink;
+                    // Check for pagination link
+                    requestUrl = simulationResponse?.NextLink;
 
-                    if (!string.IsNullOrEmpty(nextLink))
+                    if (!string.IsNullOrEmpty(requestUrl))
                     {
-                        _logger.LogInformation($"Next page found: {nextLink}. Waiting 5 seconds...");
-                        await Task.Delay(TimeSpan.FromSeconds(5));
+                        //_logger.LogInformation($"Next page found: {requestUrl}. Waiting 5 seconds...");
+                        await Task.Delay(TimeSpan.FromSeconds(1)); // Ensure delay happens before next request
                     }
                 }
                 catch (Exception ex)
@@ -230,9 +243,143 @@ namespace SimulationAttack_Dataverse
                     break;
                 }
 
+            } while (!string.IsNullOrEmpty(requestUrl));
+
+            _logger.LogInformation($"Total simulations retrieved: {simulations.Count}");
+            return simulations;
+        }
+        private static async Task<List<UserCoverage>> GetAllAttackSimulationUserCoverage(string graphBaseUrl, ILogger _logger)
+        {
+            _logger.LogInformation("Starting GetAllAttackSimulationUserCoverage...");
+
+            var client = new HttpClient(new SocketsHttpHandler { EnableMultipleHttp2Connections = true });
+
+            var allUserCoverage = new List<UserCoverage>();
+            string nextLink = $"{graphBaseUrl}/v1.0/reports/security/getAttackSimulationSimulationUserCoverage";
+            DateTime lastLogTime = DateTime.UtcNow;
+
+            string accessToken = await GetAccessToken(graphBaseUrl, _logger);
+            DateTime tokenExpiryTime = DateTime.UtcNow.AddMinutes(50); // Assuming a 50-minute expiry for the token
+
+            int retryCount = 0;
+            const int maxRetries = 5;
+
+            do
+            {
+                try
+                {
+                    // Refresh token only when it's about to expire or expired
+                    if (DateTime.UtcNow >= tokenExpiryTime)
+                    {
+                        _logger.LogInformation("Refreshing access token...");
+                        accessToken = await GetAccessToken(graphBaseUrl, _logger);
+                        tokenExpiryTime = DateTime.UtcNow.AddMinutes(50); // Reset expiry time
+                    }
+                    client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+
+                    var response = await client.GetAsync(nextLink);
+                    //_logger.LogInformation($"Fetching data from: {nextLink}");
+                    //_logger.LogInformation($"Response Status: {response.StatusCode}");
+
+                    if (response.StatusCode == HttpStatusCode.Unauthorized)
+                    {
+                        _logger.LogWarning("Access token expired, refreshing and retrying...");
+                        accessToken = await GetAccessToken(graphBaseUrl, _logger);
+                        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+
+                        response = await client.GetAsync(nextLink);
+                        _logger.LogInformation($"Retry Response Status: {response.StatusCode}");
+                    }
+
+                    if (response.StatusCode == HttpStatusCode.TooManyRequests) // 429 Rate Limit Handling
+                    {
+                        if (response.Headers.TryGetValues("Retry-After", out var values) && int.TryParse(values.FirstOrDefault(), out int retryAfter))
+                        {
+                            _logger.LogWarning($"Rate limit hit. Waiting {retryAfter} seconds before retrying...");
+                            await Task.Delay(TimeSpan.FromSeconds(retryAfter));
+                        }
+                        else
+                        {
+                            _logger.LogWarning("Rate limit hit. Waiting 30 seconds before retrying...");
+                            await Task.Delay(TimeSpan.FromSeconds(30)); // Default wait if Retry-After is not provided
+                        }
+                        continue; // Retry instead of moving forward
+                    }
+
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        string errorContent = await response.Content.ReadAsStringAsync();
+                        _logger.LogError($"Error: {response.StatusCode} - {errorContent}");
+
+                        if (retryCount < maxRetries)
+                        {
+                            _logger.LogWarning($"Retrying request... Attempt {retryCount + 1}/{maxRetries}");
+                            retryCount++;
+                            await Task.Delay(TimeSpan.FromSeconds(5 * retryCount)); // Exponential backoff
+                            continue;
+                        }
+                        else
+                        {
+                            _logger.LogError("Max retries reached. Skipping this batch.");
+                            break; // Exit loop after max retries
+                        }
+                    }
+
+                    var responseBody = await response.Content.ReadAsStringAsync();
+                    var userCoverageResponse = JsonConvert.DeserializeObject<UserCoverageResponse>(responseBody);
+
+                    if (userCoverageResponse?.Value != null && userCoverageResponse.Value.Count > 0)
+                    {
+                        //_logger.LogInformation($"Records retrieved in this batch: {userCoverageResponse.Value.Count}");
+                        allUserCoverage.AddRange(userCoverageResponse.Value);
+                        retryCount = 0; // Reset retry count on success
+
+                        if ((DateTime.UtcNow - lastLogTime).TotalSeconds >= 60)
+                        {
+                            _logger.LogInformation($"Total records retrieved so far: {allUserCoverage.Count}");
+                            lastLogTime = DateTime.UtcNow;
+                        }
+                    }
+                    else
+                    {
+                        _logger.LogWarning("Received empty data batch. Checking if there are more pages...");
+                    }
+
+                    nextLink = userCoverageResponse?.NextLink;
+
+                    if (!string.IsNullOrEmpty(nextLink))
+                    {
+                        if (response.Headers.TryGetValues("Retry-After", out var retryValues) && int.TryParse(retryValues.FirstOrDefault(), out int retryAfter))
+                        {
+                            _logger.LogWarning($"Rate limit detected. Waiting {retryAfter} seconds...");
+                            await Task.Delay(TimeSpan.FromSeconds(retryAfter));
+                        }
+                        else
+                        {
+                            await Task.Delay(TimeSpan.FromMilliseconds(500)); // Reduced delay between requests
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError($"Exception: {ex.Message}\nStackTrace: {ex.StackTrace}");
+                    if (retryCount < maxRetries)
+                    {
+                        _logger.LogWarning($"Retrying due to exception... Attempt {retryCount + 1}/{maxRetries}");
+                        retryCount++;
+                        await Task.Delay(TimeSpan.FromSeconds(5 * retryCount)); // Exponential backoff
+                        continue;
+                    }
+                    else
+                    {
+                        _logger.LogError("Max retries reached due to exception. Exiting...");
+                        throw;  // Let it bubble up
+                    }
+                }
+
             } while (!string.IsNullOrEmpty(nextLink));
 
-            _logger.LogInformation($"Total simulations retrieved: {allUserCoverage.Count}");
+            _logger.LogInformation($"Final total records retrieved: {allUserCoverage.Count}");
             return allUserCoverage;
         }
         private static async Task<List<TrainingUserCoverage>> GetTrainingUserCoverage(string graphBaseUrl, string accessToken)
@@ -289,63 +436,10 @@ namespace SimulationAttack_Dataverse
             Console.WriteLine($"Total training user coverage records retrieved: {allTrainingUserCoverage.Count}");
             return allTrainingUserCoverage;
         }
-        private static async Task<List<Simulation>> GetSimulations(string graphBaseUrl, string accessToken, ILogger _logger)
+        private static async Task<List<SimulationUsers>> GetSimulationUsers(string graphBaseUrl, string accessToken, string id, ILogger _logger)
         {
-            var simulations = new List<Simulation>();
-            string requestUrl = $"{graphBaseUrl}/v1.0/security/attackSimulation/simulations";
+            var client = new HttpClient(new SocketsHttpHandler { EnableMultipleHttp2Connections = true });
 
-            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
-
-            do
-            {
-                try
-                {
-                    _logger.LogInformation($"Fetching simulations from: {requestUrl}");
-
-                    var response = await client.GetAsync(requestUrl);
-                    if (!response.IsSuccessStatusCode)
-                    {
-                        _logger.LogError($"Error: {response.StatusCode} - {await response.Content.ReadAsStringAsync()}");
-                        break;
-                    }
-
-                    var responseBody = await response.Content.ReadAsStringAsync();
-                    var simulationResponse = JsonConvert.DeserializeObject<SimulationResponse>(responseBody);
-
-                    if (simulationResponse?.Value != null)
-                    {
-                        _logger.LogInformation($"Retrieved {simulationResponse.Value.Count} simulations.");
-                        simulations.AddRange(simulationResponse.Value);
-                    }
-                    else
-                    {
-                        _logger.LogWarning("No simulations found in the response.");
-                    }
-
-                    // Check for pagination link
-                    requestUrl = simulationResponse?.NextLink;
-
-                    if (!string.IsNullOrEmpty(requestUrl))
-                    {
-                        _logger.LogInformation($"Next page found: {requestUrl}. Waiting 5 seconds...");
-                        await Task.Delay(TimeSpan.FromSeconds(5)); // Ensure delay happens before next request
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError($"Exception: {ex.Message}");
-                    break;
-                }
-
-            } while (!string.IsNullOrEmpty(requestUrl));
-
-            _logger.LogInformation($"Total simulations retrieved: {simulations.Count}");
-            return simulations;
-        }
-
-        private static async Task<List<SimulationUsers>> GetSimulationUsers(string graphBaseUrl, string accessToken, string id)
-        {
-            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
             var allSimulationUsers = new List<SimulationUsers>();
             string nextLink = $"{graphBaseUrl}/v1.0/security/attackSimulation/simulations/{id}/report/simulationUsers";
 
@@ -353,26 +447,42 @@ namespace SimulationAttack_Dataverse
             {
                 try
                 {
-                    Console.WriteLine($"Fetching simulation users from: {nextLink}");
+                    //_logger.LogInformation($"Fetching simulation users from: {nextLink}");
 
+                    client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
                     var response = await client.GetAsync(nextLink);
+
+                    //_logger.LogInformation($"Response Status: {response.StatusCode}");
+
+                    // Handle expired token case
+                    if (response.StatusCode == HttpStatusCode.Unauthorized)
+                    {
+                        _logger.LogWarning("Access token expired, refreshing and retrying...");
+                        accessToken = await GetAccessToken(graphBaseUrl, _logger); // Refresh token
+                        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+
+                        response = await client.GetAsync(nextLink);
+                        _logger.LogInformation($"Retry Response Status: {response.StatusCode}");
+                    }
+
                     if (!response.IsSuccessStatusCode)
                     {
-                        Console.WriteLine($"Error: {response.StatusCode} - {await response.Content.ReadAsStringAsync()}");
+                        string errorContent = await response.Content.ReadAsStringAsync();
+                        _logger.LogError($"Error: {response.StatusCode} - {errorContent}");
                         break;
                     }
 
                     var responseBody = await response.Content.ReadAsStringAsync();
                     var simulationUsersResponse = JsonConvert.DeserializeObject<SimulationUsersResponse>(responseBody);
 
-                    if (simulationUsersResponse?.Value != null)
+                    if (simulationUsersResponse?.Value != null && simulationUsersResponse.Value.Count > 0)
                     {
-                        Console.WriteLine($"Retrieved {simulationUsersResponse.Value.Count} simulation user records.");
+                        //_logger.LogInformation($"Retrieved {simulationUsersResponse.Value.Count} simulation user records.");
                         allSimulationUsers.AddRange(simulationUsersResponse.Value);
                     }
                     else
                     {
-                        Console.WriteLine("No simulation users found in the response.");
+                        _logger.LogWarning("No simulation users found in the response.");
                     }
 
                     // Check for the next page
@@ -380,19 +490,26 @@ namespace SimulationAttack_Dataverse
 
                     if (!string.IsNullOrEmpty(nextLink))
                     {
-                        Console.WriteLine($"Next page found: {nextLink}. Waiting 5 seconds...");
-                        await Task.Delay(TimeSpan.FromSeconds(5));
+                        if (response.Headers.TryGetValues("Retry-After", out var values) && int.TryParse(values.FirstOrDefault(), out int retryAfter))
+                        {
+                            _logger.LogWarning($"Rate limit hit. Waiting {retryAfter} seconds...");
+                            await Task.Delay(TimeSpan.FromSeconds(retryAfter));
+                        }
+                        else
+                        {
+                            await Task.Delay(TimeSpan.FromMilliseconds(500)); // Reduced delay
+                        }
                     }
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"Exception: {ex.Message}");
+                    _logger.LogError($"Exception: {ex.Message}\nStackTrace: {ex.StackTrace}");
                     break;
                 }
 
             } while (!string.IsNullOrEmpty(nextLink));
 
-            Console.WriteLine($"Total simulation user records retrieved: {allSimulationUsers.Count}");
+            _logger.LogInformation($"Total simulation user records retrieved: {allSimulationUsers.Count}");
             return allSimulationUsers;
         }
 
@@ -416,45 +533,43 @@ namespace SimulationAttack_Dataverse
 
         private static async Task WriteUserCoverageToDataverse(ServiceClient serviceClient, UserCoverage user, string CoverageUsersTable, ILogger logger)
         {
-            // Log the check for existing records
-            // logger.LogInformation($"Checking for existing record in {CoverageUsersTable} where crfac_attacksimulationuser = {JsonConvert.SerializeObject(user.AttackSimulationUser.UserId)}");
-
-            // Retrieve the existing record
             var tableprefix = Environment.GetEnvironmentVariable("tableprefix", EnvironmentVariableTarget.Process);
-            var existingRecord = await RetrieveExistingRecord(serviceClient, CoverageUsersTable, ($"{tableprefix}_attacksimulationuser"), JsonConvert.SerializeObject(user.AttackSimulationUser));
+            string userJson = JsonConvert.SerializeObject(user.AttackSimulationUser);
+
+            var existingRecord = await RetrieveExistingRecord(serviceClient, CoverageUsersTable, $"{tableprefix}_attacksimulationuser", userJson);
+
+            int processedCount = 0;
+            DateTime lastLogTime = DateTime.UtcNow;
+
+            var entity = new Entity(CoverageUsersTable)
+            {
+                [($"{tableprefix}_simulationcount")] = user.SimulationCount,
+                [($"{tableprefix}_latestsimulationdatetime")] = user.LatestSimulationDateTime ?? (DateTime?)null,
+                [($"{tableprefix}_clickcount")] = user.ClickCount,
+                [($"{tableprefix}_compromisedcount")] = user.CompromisedCount,
+                [($"{tableprefix}_attacksimulationuser")] = userJson,
+            };
 
             if (existingRecord != null)
             {
-                // Record exists, prepare the entity for update
-                var entityToUpdate = new Entity(CoverageUsersTable)
-                {
-                    Id = existingRecord.Id, // Set the ID of the existing record
-                    [($"{tableprefix}_simulationcount")] = user.SimulationCount,
-                    [($"{tableprefix}_latestsimulationdatetime")] = user.LatestSimulationDateTime ?? (DateTime?)null,
-                    [($"{tableprefix}_clickcount")] = user.ClickCount,
-                    [($"{tableprefix}_compromisedcount")] = user.CompromisedCount,
-                    [($"{tableprefix}_attacksimulationuser")] = JsonConvert.SerializeObject(user.AttackSimulationUser),
-                };
-
-                // Perform the update
-                await serviceClient.UpdateAsync(entityToUpdate);
-                logger.LogInformation($"Updated user coverage record for {user.AttackSimulationUser.UserId}");
+                entity.Id = existingRecord.Id;
+                await serviceClient.UpdateAsync(entity);
+                //logger.LogInformation($"Updated user coverage record for {user.AttackSimulationUser.UserId}");
             }
             else
             {
-                // Record does not exist, prepare the entity for creation
-                var entityToCreate = new Entity(CoverageUsersTable)
-                {
-                    [($"{tableprefix}_simulationcount")] = user.SimulationCount,
-                    [($"{tableprefix}_latestsimulationdatetime")] = user.LatestSimulationDateTime ?? (DateTime?)null,
-                    [($"{tableprefix}_clickcount")] = user.ClickCount,
-                    [($"{tableprefix}_compromisedcount")] = user.CompromisedCount,
-                    [($"{tableprefix}_attacksimulationuser")] = JsonConvert.SerializeObject(user.AttackSimulationUser),
-                };
+                await serviceClient.CreateAsync(entity);
+                //logger.LogInformation($"Created new user coverage record for {user.AttackSimulationUser.UserId}");
+            }
 
-                // Perform the create operation
-                await serviceClient.CreateAsync(entityToCreate);
-                logger.LogInformation($"Created new user coverage record for {user.AttackSimulationUser.UserId}");
+            // Track the count of processed records
+            Interlocked.Increment(ref processedCount);
+
+            // Log every 60 seconds
+            if ((DateTime.UtcNow - lastLogTime).TotalSeconds >= 60)
+            {
+                logger.LogInformation($"Total records processed so far: {processedCount}");
+                lastLogTime = DateTime.UtcNow;
             }
         }
         private static async Task WriteSimulationToDataverse(ServiceClient serviceClient, Simulation simulation, string SimulationTable, ILogger _logger)
@@ -542,7 +657,7 @@ namespace SimulationAttack_Dataverse
                 throw new Exception($"Error writing to Dataverse: {ex.Message}");
             }
         }
-        private static async Task WriteSimulationUsersToDataverse(ServiceClient serviceClient, SimulationUsers SimulationUsers, string SimulationUsersTable, ILogger logger)
+        private static async Task WriteSimulationUsersToDataverse(ServiceClient serviceClient, SimulationUsers SimulationUsers, string SimulationUsersTable, string id, ILogger logger)
         {
             var tableprefix = Environment.GetEnvironmentVariable("tableprefix", EnvironmentVariableTarget.Process);
             // Retrieve the existing record
@@ -555,6 +670,7 @@ namespace SimulationAttack_Dataverse
                 {
                     Id = existingRecord.Id, // Set the ID of the existing record
                     [($"{tableprefix}_iscompromised")] = SimulationUsers.isCompromised,
+                    [($"{tableprefix}_simulationid")] = id,
                     [($"{tableprefix}_compromiseddatetime")] = SimulationUsers.compromisedDateTime ?? (DateTime?)null,
                     [($"{tableprefix}_assignedtrainingscount")] = SimulationUsers.assignedTrainingsCount,
                     [($"{tableprefix}_completedtrainingscount")] = SimulationUsers.completedTrainingsCount,
@@ -566,7 +682,7 @@ namespace SimulationAttack_Dataverse
 
                 // Perform the update
                 await serviceClient.UpdateAsync(entityToUpdate);
-                logger.LogInformation($"Updated user SimulationUsers record for {SimulationUsers.simulationUser.UserId}");
+                //logger.LogInformation($"Updated user SimulationUsers record for {SimulationUsers.simulationUser.UserId}");
             }
             else
             {
@@ -574,6 +690,7 @@ namespace SimulationAttack_Dataverse
                 var entityToCreate = new Entity(SimulationUsersTable)
                 {
                     [($"{tableprefix}_iscompromised")] = SimulationUsers.isCompromised,
+                    [($"{tableprefix}_simulationid")] = id,
                     [($"{tableprefix}_compromiseddatetime")] = SimulationUsers.compromisedDateTime ?? (DateTime?)null,
                     [($"{tableprefix}_assignedtrainingscount")] = SimulationUsers.assignedTrainingsCount,
                     [($"{tableprefix}_completedtrainingscount")] = SimulationUsers.completedTrainingsCount,
@@ -585,7 +702,7 @@ namespace SimulationAttack_Dataverse
 
                 // Perform the create operation
                 await serviceClient.CreateAsync(entityToCreate);
-                logger.LogInformation($"Created new user SimulationUsers record for {SimulationUsers.simulationUser.UserId}");
+                //logger.LogInformation($"Created new user SimulationUsers record for {SimulationUsers.simulationUser.UserId}");
             }
         }
         private static async Task WriteTrainingUserCoverageToDataverse(ServiceClient serviceClient, TrainingUserCoverage TrainingUsers, string TrainingUserTable, ILogger logger)
@@ -732,7 +849,8 @@ namespace SimulationAttack_Dataverse
 
         public class SimulationUsers
         {
-            public string isCompromised { get; set; }
+            public string isCompromised { get; set; }       
+            public string SimulationID { get; set; }
             public DateTime? compromisedDateTime { get; set; }
             public int assignedTrainingsCount { get; set; }
             public int completedTrainingsCount { get; set; }
