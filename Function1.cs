@@ -1,23 +1,24 @@
-using System;
-using System.Collections.Generic;
-using System.Net.Http;
-using System.Net.Http.Headers;
-using System.Threading.Tasks;
-using System.IO;
+using Azure.Core;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
 using Microsoft.PowerPlatform.Dataverse.Client;
-using Newtonsoft.Json;
-using Microsoft.Xrm.Sdk;
-using Microsoft.Xrm.Sdk.Query;
-using static Grpc.Core.Metadata;
 using Microsoft.PowerPlatform.Dataverse.Client.Extensions;
-using static Microsoft.ApplicationInsights.MetricDimensionNames.TelemetryContext;
-using static SimulationAttack_Dataverse.Function1.UserCoverage;
-using static SimulationAttack_Dataverse.Function1;
-using System.Net;
-using Azure.Core;
 using Microsoft.Rest;
+using Microsoft.Xrm.Sdk;
+using Microsoft.Xrm.Sdk.Messages;
+using Microsoft.Xrm.Sdk.Query;
+using Newtonsoft.Json;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Net;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Threading.Tasks;
+using static Grpc.Core.Metadata;
+using static Microsoft.ApplicationInsights.MetricDimensionNames.TelemetryContext;
+using static SimulationAttack_Dataverse.Function1;
+using static SimulationAttack_Dataverse.Function1.UserCoverage;
 
 
 namespace SimulationAttack_Dataverse
@@ -37,7 +38,7 @@ namespace SimulationAttack_Dataverse
 
         [Function("MDO-SimulationData-Dataverse")]
         //public async Task Run([TimerTrigger("0 0 6 * * *")] TimerInfo myTimer) // Once a day at 2am
-        public async Task Run([TimerTrigger("0 0 */2 * * *")] TimerInfo myTimer) //Every 2hrs
+        public async Task Run([TimerTrigger("0 0 */1 * * *")] TimerInfo myTimer) //Every hour
         {
             _logger.LogInformation($"C# Timer trigger function executed at: {DateTime.Now}");
 
@@ -92,12 +93,25 @@ namespace SimulationAttack_Dataverse
                 // Step 3: Fetch simulations
                 var simulations = await GetSimulations(serviceClient, SimulationTable, graphBaseUrl, accessToken, _logger);
 
+                // Filter by date range first
+                DateTime startDate = DateTime.UtcNow.AddDays(-200).Date;
+                DateTime endDate = DateTime.UtcNow.AddDays(-30).Date;
+                DateTime now = DateTime.UtcNow;
+
                 // Start writing simulations concurrently
+                DateTime lastRun = now.AddDays(-5);
+
                 var simulationTasks = simulations
-                    .Select(simulation => WriteSimulationToDataverse(serviceClient, simulation, SimulationTable, _logger))
+                    .Where(simulation =>
+                        simulation.Status == "running" || // still running
+                        (simulation.CompletionDateTime.Value > lastRun &&
+                         simulation.CompletionDateTime.Value <= now)) // Last Five days of completion time
+                    .Select(simulation =>
+                        WriteSimulationToDataverse(serviceClient, simulation, SimulationTable, _logger))
                     .ToList();
 
-                await Task.WhenAll(simulationTasks); // Wait for all simulation writes to finish
+                await Task.WhenAll(simulationTasks);
+
 
                 // Step 4: Get all simulation IDs
                 var simulationIds = simulations.Select(sim => sim.Id).ToList();
@@ -105,54 +119,94 @@ namespace SimulationAttack_Dataverse
                 // Step 5: Retrieve sync statuses from Dataverse
                 var syncStatuses = await RetrieveSyncStatusesForSimulations(serviceClient, SimulationTable, simulationIds, _logger);
 
-                // Step 6: Filter simulations with syncStatus != "Completed"
-                var incompleteSimulations = simulations
-                    .Where(sim =>
-                        !syncStatuses.TryGetValue(sim.Id, out var status) ||
-                        !status.Equals("Completed", StringComparison.OrdinalIgnoreCase)
-                    )
-                    .ToList();
-
-                // Filter by date range first
-                DateTime startDate = DateTime.UtcNow.AddDays(-160).Date;
-                DateTime now = DateTime.UtcNow;
-
-                var filteredByDate = incompleteSimulations
-                    .Where(sim =>
-                        sim.CompletionDateTime.HasValue &&
-                        sim.CompletionDateTime.Value >= startDate &&
-                        sim.CompletionDateTime.Value <= now)
-                    .Take(2) // Now we take top 5 *after* date filtering
-                    .ToList();
-
-
-                if (filteredByDate?.Any() == true)
+                // Step 6: Filter simulations based on status and sync rules
+                var simulationsToSync = simulations.Where(sim =>
                 {
-                    foreach (var simulation in filteredByDate)
+                    var hasStatus = syncStatuses.TryGetValue(sim.Id, out var syncInfo);
+                    string syncStatus = hasStatus ? syncInfo : null;
+
+                    if (sim.Status.Equals("succeeded", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return (!hasStatus || !syncStatus.Equals("Completed", StringComparison.OrdinalIgnoreCase)) &&
+                              // sim.CompletionDateTime.HasValue &&
+                              // sim.CompletionDateTime.Value >= startDate &&
+                               sim.CompletionDateTime.Value <= now;
+                    }
+
+                    if (sim.Status.Equals("running", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (!hasStatus) return true;
+
+                        // Check if it's been more than 24h since last sync
+                        if (DateTime.TryParse(syncStatus, out var lastSynced))
+                        {
+                            return (DateTime.UtcNow - lastSynced).TotalHours >= 48;
+                        }
+
+                        return true;
+                    }
+
+                    if (sim.Status.Equals("cancelled", StringComparison.OrdinalIgnoreCase) ||
+                        sim.Status.Equals("excluded", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return !hasStatus || !syncStatus.Equals("Completed", StringComparison.OrdinalIgnoreCase);
+                    }
+
+                    return false;
+                }).Take(18).ToList();
+
+                // Use simulationsToSync instead of filteredByDate
+                //if (simulationsToSync?.Any() == true)
+                //{
+                //    foreach (var simulation in simulationsToSync)
+                //    {
+                //        try
+                //        {
+                //            var simulationUsersList = await GetSimulationUsers(graphBaseUrl, accessToken, simulation.Id, _logger);
+                //            //await AddUserCountToSimulation(serviceClient, simulation.Id, SimulationTable, simulationUsersList.Count, _logger);
+                //            _logger.LogInformation($"Updating simulation: {simulation.Id}");
+                //            foreach (var user in simulationUsersList)
+                //            {
+                //                try
+                //                {
+                //                    await WriteSimulationUsersToDataverse(serviceClient, user, SimulationUsersTable, simulation.Id, _logger);
+                //                }
+                //                catch (Exception ex)
+                //                {
+                //                    _logger.LogError(ex, $"Failed to write user for simulation {simulation.Id}");
+                //                }
+                //            }
+
+                //            await MarkSimulationAsProcessed(serviceClient, simulation.Id, SimulationTable, _logger, simulation.Status);
+                //        }
+                //        catch (Exception ex)
+                //        {
+                //            _logger.LogError(ex, $"Failed processing simulation {simulation.Id}");
+                //        }
+                //    }
+                //}
+
+                if (simulationsToSync?.Any() == true)
+                {
+                    foreach (var simulation in simulationsToSync)
                     {
                         try
                         {
                             var simulationUsersList = await GetSimulationUsers(graphBaseUrl, accessToken, simulation.Id, _logger);
 
-                            foreach (var user in simulationUsersList)
-                            {
-                                try
-                                {
-                                    await WriteSimulationUsersToDataverse(serviceClient, user, SimulationUsersTable, simulation.Id, _logger);
-                                }
-                                catch (Exception ex)
-                                {
-                                    _logger.LogError(ex, $"Failed to write user for simulation {simulation.Id}");
-                                }
-                            }
+                            _logger.LogInformation($"Updating simulation: {simulation.Id} with {simulationUsersList.Count} users");
 
-                            await MarkSimulationAsProcessed(serviceClient, simulation.Id, SimulationTable, _logger);
+                            // Batch write instead of per-user write
+                            await WriteSimulationUsersBatchToDataverse(serviceClient, simulationUsersList, SimulationUsersTable, simulation.Id, _logger);
+
+                            await MarkSimulationAsProcessed(serviceClient, simulation.Id, SimulationTable, _logger, simulation.Status);
                         }
                         catch (Exception ex)
                         {
                             _logger.LogError(ex, $"Failed processing simulation {simulation.Id}");
                         }
                     }
+
                 }
 
                 // Step 5: Fetch TrainingUserCoverage data
@@ -282,7 +336,7 @@ namespace SimulationAttack_Dataverse
 
                     if (!string.IsNullOrEmpty(requestUrl))
                     {
-                        await Task.Delay(TimeSpan.FromSeconds(1)); // Ensure delay happens before next request
+                        await Task.Delay(TimeSpan.FromSeconds(1));
                     }
                 }
                 catch (Exception ex)
@@ -500,76 +554,95 @@ namespace SimulationAttack_Dataverse
             _logger.LogInformation($"Total training user coverage records retrieved: {allTrainingUserCoverage.Count}");
             return allTrainingUserCoverage;
         }
-
-        private static async Task<List<SimulationUsers>> GetSimulationUsers(string graphBaseUrl, string accessToken, string id, ILogger _logger)
+        private static async Task<List<SimulationUsers>> GetSimulationUsers(string graphBaseUrl,string accessToken,string id,ILogger _logger)
         {
             var client = new HttpClient(new SocketsHttpHandler { EnableMultipleHttp2Connections = true });
-
             var allSimulationUsers = new List<SimulationUsers>();
+
             string nextLink = $"{graphBaseUrl}/v1.0/security/attackSimulation/simulations/{id}/report/simulationUsers";
+
+            int maxRetries = 3;
+            int delayBaseMs = 1000; 
 
             do
             {
                 try
                 {
-                    //_logger.LogInformation($"Fetching simulation users from: {nextLink}");
+                    client.DefaultRequestHeaders.Authorization =
+                        new AuthenticationHeaderValue("Bearer", accessToken);
 
-                    client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
-                    var response = await client.GetAsync(nextLink);
+                    HttpResponseMessage response = await client.GetAsync(nextLink);
 
-                    //_logger.LogInformation($"Response Status: {response.StatusCode}");
-
-                    // Handle expired token case
+                    // If expired token, request new onw
                     if (response.StatusCode == HttpStatusCode.Unauthorized)
                     {
                         _logger.LogWarning("Access token expired, refreshing and retrying...");
-                        accessToken = await GetAccessToken(graphBaseUrl, _logger); // Refresh token
-                        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+                        accessToken = await GetAccessToken(graphBaseUrl, _logger);
+                        client.DefaultRequestHeaders.Authorization =
+                            new AuthenticationHeaderValue("Bearer", accessToken);
 
                         response = await client.GetAsync(nextLink);
-                        _logger.LogInformation($"Retry Response Status: {response.StatusCode}");
+                    }
+
+                    // Retry on failure
+                    int retries = 0;
+                    while (!response.IsSuccessStatusCode && retries < maxRetries)
+                    {
+                        retries++;
+                        string errorContent = await response.Content.ReadAsStringAsync();
+                        _logger.LogWarning($"Request failed ({response.StatusCode}). Attempt {retries}/{maxRetries}. Error: {errorContent}");
+
+                        // Exponential backoff
+                        await Task.Delay(delayBaseMs * retries);
+                        response = await client.GetAsync(nextLink);
                     }
 
                     if (!response.IsSuccessStatusCode)
                     {
                         string errorContent = await response.Content.ReadAsStringAsync();
-                        _logger.LogError($"Error: {response.StatusCode} - {errorContent}");
+                        _logger.LogError($"Final failure: {response.StatusCode} - {errorContent}");
                         break;
                     }
 
                     var responseBody = await response.Content.ReadAsStringAsync();
+
+                    // (Optional) Debug raw JSON if deserialization issues occur
+                    //_logger.LogDebug($"Raw JSON response: {responseBody}");
+
                     var simulationUsersResponse = JsonConvert.DeserializeObject<SimulationUsersResponse>(responseBody);
 
                     if (simulationUsersResponse?.Value != null && simulationUsersResponse.Value.Count > 0)
                     {
-                        //_logger.LogInformation($"Retrieved {simulationUsersResponse.Value.Count} simulation user records.");
                         allSimulationUsers.AddRange(simulationUsersResponse.Value);
+                        _logger.LogInformation($"Retrieved {simulationUsersResponse.Value.Count} records (total so far: {allSimulationUsers.Count}).");
                     }
                     else
                     {
-                        _logger.LogWarning("No simulation users found in the response.");
+                        _logger.LogWarning("No simulation users found in this page.");
                     }
 
-                    // Check for the next page
+                    // Paging
                     nextLink = simulationUsersResponse?.NextLink;
 
                     if (!string.IsNullOrEmpty(nextLink))
                     {
-                        if (response.Headers.TryGetValues("Retry-After", out var values) && int.TryParse(values.FirstOrDefault(), out int retryAfter))
+                        // Handle throttling (Graph 429 / Retry-After)
+                        if (response.Headers.TryGetValues("Retry-After", out var values) &&
+                            int.TryParse(values.FirstOrDefault(), out int retryAfter))
                         {
                             _logger.LogWarning($"Rate limit hit. Waiting {retryAfter} seconds...");
                             await Task.Delay(TimeSpan.FromSeconds(retryAfter));
                         }
                         else
                         {
-                            await Task.Delay(TimeSpan.FromMilliseconds(500)); // Reduced delay
+                            await Task.Delay(TimeSpan.FromMilliseconds(1000)); // safer default delay
                         }
                     }
                 }
                 catch (Exception ex)
                 {
                     _logger.LogError($"Exception: {ex.Message}\nStackTrace: {ex.StackTrace}");
-                    break;
+                    break; // unexpected exception, stop
                 }
 
             } while (!string.IsNullOrEmpty(nextLink));
@@ -595,7 +668,6 @@ namespace SimulationAttack_Dataverse
             var results = await serviceClient.RetrieveMultipleAsync(query);
             return results.Entities.FirstOrDefault(); // Return the first record found, if any
         }
-
         private static async Task<Entity> RetrieveExistingRecordSimUser(ServiceClient serviceClient, string tableName, string simulationUserFieldName, string simulationUserFieldValue, string simulationIdFieldName, string simulationIdFieldValue)
         {
             var query = new QueryExpression(tableName)
@@ -661,6 +733,7 @@ namespace SimulationAttack_Dataverse
             var tableprefix = Environment.GetEnvironmentVariable("tableprefix", EnvironmentVariableTarget.Process);
             // Log the table name for verification
             _logger.LogInformation($"Writing to Dataverse table: {SimulationTable}");
+            _logger.LogInformation($"Writing Simulation: {simulation.DisplayName} to Dataverse");
 
             try
             {
@@ -797,6 +870,171 @@ namespace SimulationAttack_Dataverse
             }
         }
 
+        private static async Task WriteSimulationUsersBatchToDataverse(ServiceClient serviceClient,List<SimulationUsers> simulationUsersList,string SimulationUsersTable,string simulationId,ILogger logger)
+        {
+            try
+            {
+                var tableprefix = Environment.GetEnvironmentVariable("tableprefix", EnvironmentVariableTarget.Process);
+
+                // 1. Pull existing records for this simulation
+                var query = new QueryExpression(SimulationUsersTable)
+                {
+                    ColumnSet = new ColumnSet($"{tableprefix}_simulationuser"),
+                    Criteria = new FilterExpression
+                    {
+                        Conditions =
+                {
+                    new ConditionExpression($"{tableprefix}_simulationid", ConditionOperator.Equal, simulationId)
+                }
+                    }
+                };
+
+                var existingRecords = serviceClient.RetrieveMultiple(query).Entities;
+                var existingDict = existingRecords.ToDictionary(
+                    e => e.GetAttributeValue<string>($"{tableprefix}_simulationuser"),
+                    e => e.Id
+                );
+
+                logger.LogInformation($"Found {existingDict.Count} existing simulation user records for simulation {simulationId}");
+
+                // 2. Build batch
+                var batch = new ExecuteMultipleRequest
+                {
+                    Requests = new OrganizationRequestCollection(),
+                    Settings = new ExecuteMultipleSettings
+                    {
+                        ContinueOnError = true,
+                        ReturnResponses = false
+                    }
+                };
+
+                foreach (var user in simulationUsersList)
+                {
+                    var serializedUser = JsonConvert.SerializeObject(user.simulationUser);
+
+                    Entity entity;
+                    OrganizationRequest request;
+
+                    if (existingDict.TryGetValue(serializedUser, out var existingId))
+                    {
+                        // Update existing
+                        entity = new Entity(SimulationUsersTable)
+                        {
+                            Id = existingId,
+                            [$"{tableprefix}_iscompromised"] = user.isCompromised,
+                            [$"{tableprefix}_compromiseddatetime"] = user.compromisedDateTime ?? (DateTime?)null,
+                            [$"{tableprefix}_assignedtrainingscount"] = user.assignedTrainingsCount,
+                            [$"{tableprefix}_completedtrainingscount"] = user.completedTrainingsCount,
+                            [$"{tableprefix}_inprogresstrainingscount"] = user.inProgressTrainingsCount,
+                            [$"{tableprefix}_reportedphishdatetime"] = user.reportedPhishDateTime ?? (DateTime?)null,
+                            [$"{tableprefix}_simulationevents"] = JsonConvert.SerializeObject(user.SimulationEvents),
+                        };
+                        request = new UpdateRequest { Target = entity };
+                    }
+                    else
+                    {
+                        // Create new
+                        entity = new Entity(SimulationUsersTable)
+                        {
+                            [$"{tableprefix}_simulationid"] = simulationId,
+                            [$"{tableprefix}_simulationuser"] = serializedUser,
+                            [$"{tableprefix}_iscompromised"] = user.isCompromised,
+                            [$"{tableprefix}_compromiseddatetime"] = user.compromisedDateTime ?? (DateTime?)null,
+                            [$"{tableprefix}_assignedtrainingscount"] = user.assignedTrainingsCount,
+                            [$"{tableprefix}_completedtrainingscount"] = user.completedTrainingsCount,
+                            [$"{tableprefix}_inprogresstrainingscount"] = user.inProgressTrainingsCount,
+                            [$"{tableprefix}_reportedphishdatetime"] = user.reportedPhishDateTime ?? (DateTime?)null,
+                            [$"{tableprefix}_simulationevents"] = JsonConvert.SerializeObject(user.SimulationEvents),
+                        };
+                        request = new CreateRequest { Target = entity };
+                    }
+
+                    batch.Requests.Add(request);
+
+                    if (batch.Requests.Count >= 500)
+                    {
+                        await serviceClient.ExecuteAsync(batch);
+                        logger.LogInformation($"Committed batch of {batch.Requests.Count} users for simulation {simulationId}");
+                        batch.Requests.Clear();
+                    }
+                }
+
+                // Commit any leftovers
+                if (batch.Requests.Count > 0)
+                {
+                    await serviceClient.ExecuteAsync(batch);
+                    logger.LogInformation($"Committed final batch of {batch.Requests.Count} users for simulation {simulationId}");
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, $"Batch write failed for simulation {simulationId}");
+            }
+        }
+
+
+        //private static async Task WriteSimulationUsersBatchToDataverse(ServiceClient serviceClient,List<SimulationUsers> simulationUsersList,string SimulationUsersTable,string simulationId,ILogger logger)
+        //{
+        //    try
+        //    {
+        //        var tableprefix = Environment.GetEnvironmentVariable("tableprefix", EnvironmentVariableTarget.Process);
+
+        //        var batch = new ExecuteMultipleRequest
+        //        {
+        //            Requests = new OrganizationRequestCollection(),
+        //            Settings = new ExecuteMultipleSettings
+        //            {
+        //                ContinueOnError = true,
+        //                ReturnResponses = false
+        //            }
+        //        };
+
+        //        foreach (var user in simulationUsersList)
+        //        {
+        //            var entity = new Entity(SimulationUsersTable)
+        //            {
+        //                // upsert based on alternate key (simulationId + simulationUser)
+        //                [$"{tableprefix}_simulationid"] = simulationId,
+        //                [$"{tableprefix}_simulationuser"] = JsonConvert.SerializeObject(user.simulationUser),
+        //                [$"{tableprefix}_iscompromised"] = user.isCompromised,
+        //                [$"{tableprefix}_compromiseddatetime"] = user.compromisedDateTime ?? (DateTime?)null,
+        //                [$"{tableprefix}_assignedtrainingscount"] = user.assignedTrainingsCount,
+        //                [$"{tableprefix}_completedtrainingscount"] = user.completedTrainingsCount,
+        //                [$"{tableprefix}_inprogresstrainingscount"] = user.inProgressTrainingsCount,
+        //                [$"{tableprefix}_reportedphishdatetime"] = user.reportedPhishDateTime ?? (DateTime?)null,
+        //                [$"{tableprefix}_simulationevents"] = JsonConvert.SerializeObject(user.SimulationEvents),
+        //            };
+
+        //            // Use UpsertRequest instead of Create/Update
+        //            var upsertRequest = new UpsertRequest
+        //            {
+        //                Target = entity
+        //            };
+
+        //            batch.Requests.Add(upsertRequest);
+
+        //            // Optional: flush batch every 500 records to avoid hitting size limits
+        //            if (batch.Requests.Count >= 500)
+        //            {
+        //                await serviceClient.ExecuteAsync(batch);
+        //                logger.LogInformation($"Committed batch of {batch.Requests.Count} simulation users for simulation {simulationId}");
+        //                batch.Requests.Clear();
+        //            }
+        //        }
+
+        //        // Commit any remaining records
+        //        if (batch.Requests.Count > 0)
+        //        {
+        //            await serviceClient.ExecuteAsync(batch);
+        //            logger.LogInformation($"Committed final batch of {batch.Requests.Count} simulation users for simulation {simulationId}");
+        //        }
+        //    }
+        //    catch (Exception ex)
+        //    {
+        //        logger.LogError(ex, $"Batch upsert failed for simulation {simulationId}");
+        //    }
+        //}
+
         private static async Task WriteTrainingUserCoverageToDataverse(ServiceClient serviceClient, TrainingUserCoverage TrainingUsers, string TrainingUserTable, ILogger logger)
         {
             var tableprefix = Environment.GetEnvironmentVariable("tableprefix", EnvironmentVariableTarget.Process);
@@ -831,7 +1069,7 @@ namespace SimulationAttack_Dataverse
                 logger.LogInformation($"Created new user TrainingUserCoverage record for {TrainingUsers.attackSimulationUser.UserId}");
             }
         }
-        private static async Task MarkSimulationAsProcessed(ServiceClient serviceClient, string simulationId, string SimulationTable, ILogger _logger)
+        private static async Task MarkSimulationAsProcessed(ServiceClient serviceClient, string simulationId, string SimulationTable, ILogger _logger, string simulationStatus)
         {
             var tableprefix = Environment.GetEnvironmentVariable("tableprefix", EnvironmentVariableTarget.Process);
 
@@ -843,31 +1081,40 @@ namespace SimulationAttack_Dataverse
 
             try
             {
-                // Retrieve the record based on simulationId (not SyncStatus)
+                // Retrieve the record based on simulationId
                 var existingRecord = await RetrieveExistingRecord(serviceClient, SimulationTable, $"{tableprefix}_id", simulationId);
 
                 if (existingRecord != null)
                 {
-                    // Check if it's already marked as completed
-                    var currentStatus = existingRecord.Contains($"{tableprefix}_syncstatus")
-                        ? existingRecord[$"{tableprefix}_syncstatus"]?.ToString()
-                        : null;
-
-                    if (string.Equals(currentStatus, "completed", StringComparison.OrdinalIgnoreCase))
-                    {
-                        _logger.LogInformation($"Simulation {simulationId} already marked as processed. Skipping update.");
-                        return;
-                    }
-
                     var updateEntity = new Entity(SimulationTable)
                     {
                         Id = existingRecord.Id
                     };
 
-                    updateEntity[$"{tableprefix}_syncstatus"] = "completed";
+                    string newSyncValue;
+
+                    if (simulationStatus.Equals("running", StringComparison.OrdinalIgnoreCase))
+                    {
+                        newSyncValue = DateTime.UtcNow.ToString("o");
+                    }
+                    else
+                    {
+                        // If just recently stopped running, mark with timestamp instead
+                        if (existingRecord.Contains($"{tableprefix}_completiondatetime") &&
+                            existingRecord.GetAttributeValue<DateTime>($"{tableprefix}_completiondatetime") >= DateTime.UtcNow.AddHours(-24))
+                        {
+                            newSyncValue = DateTime.UtcNow.ToString("o"); // still allow one more sync
+                        }
+                        else
+                        {
+                            newSyncValue = "Completed"; // finalized
+                        }
+                    }
+
+                    updateEntity[$"{tableprefix}_syncstatus"] = newSyncValue;
 
                     await serviceClient.UpdateAsync(updateEntity);
-                    _logger.LogInformation($"Marked simulation {simulationId} as processed (SyncStatus = 'completed')");
+                    _logger.LogInformation($"Marked simulation {simulationId} as processed (SyncStatus = '{newSyncValue}')");
                 }
                 else
                 {
@@ -879,6 +1126,44 @@ namespace SimulationAttack_Dataverse
                 _logger.LogError(ex, $"Failed to mark simulation {simulationId} as processed.");
             }
         }
+
+        private static async Task AddUserCountToSimulation(ServiceClient serviceClient, string simulationId, string SimulationTable, int userCount, ILogger _logger)
+        {
+            var tableprefix = Environment.GetEnvironmentVariable("tableprefix", EnvironmentVariableTarget.Process);
+
+            if (!Guid.TryParse(simulationId, out Guid simulationGuid))
+            {
+                _logger.LogError($"Invalid simulationId format: {simulationId}");
+                return;
+            }
+
+            try
+            {
+                var existingRecord = await RetrieveExistingRecord(serviceClient, SimulationTable, $"{tableprefix}_id", simulationId);
+
+                if (existingRecord != null)
+                {
+                    var updateEntity = new Entity(SimulationTable)
+                    {
+                        Id = existingRecord.Id
+                    };
+
+                    updateEntity[$"{tableprefix}_usercount"] = userCount;
+
+                    await serviceClient.UpdateAsync(updateEntity);
+                    _logger.LogInformation($"Updated simulation {simulationId} with user count = {userCount}");
+                }
+                else
+                {
+                    _logger.LogWarning($"Could not find simulation record with ID: {simulationId} to update user count.");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"Failed to update user count for simulation {simulationId}.");
+            }
+        }
+
         private static async Task<Dictionary<string, string>> RetrieveSyncStatusesForSimulations( ServiceClient serviceClient, string tableName, List<string> simulationIds, ILogger _logger)
         { 
             var tableprefix = Environment.GetEnvironmentVariable("tableprefix", EnvironmentVariableTarget.Process);
