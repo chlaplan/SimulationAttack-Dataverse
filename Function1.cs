@@ -37,8 +37,7 @@ namespace SimulationAttack_Dataverse
         }
 
         [Function("MDO-SimulationData-Dataverse")]
-        //public async Task Run([TimerTrigger("0 0 6 * * *")] TimerInfo myTimer) // Once a day at 2am
-        public async Task Run([TimerTrigger("0 0 */1 * * *")] TimerInfo myTimer) //Every hour
+        public async Task Run([TimerTrigger("0 0 */1 * * *")] TimerInfo myTimer)
         {
             _logger.LogInformation($"C# Timer trigger function executed at: {DateTime.Now}");
 
@@ -55,9 +54,9 @@ namespace SimulationAttack_Dataverse
                 string environmentName = Environment.GetEnvironmentVariable("EnvironmentName") ?? "Global";
                 string DataverseConnection = Environment.GetEnvironmentVariable("DataverseConnection");
                 string SimulationTable = Environment.GetEnvironmentVariable("SimulationTable");
-                string CoverageUsersTable = Environment.GetEnvironmentVariable("CoverageUsersTable"); // Table for user coverage
-                string SimulationUsersTable = Environment.GetEnvironmentVariable("SimulationUsersTable"); // Table for SimulationUsersTable
-                string TrainingUserTable = Environment.GetEnvironmentVariable("TrainingUserTable"); // Table for SimulationUsersTable
+                string CoverageUsersTable = Environment.GetEnvironmentVariable("CoverageUsersTable"); 
+                string SimulationUsersTable = Environment.GetEnvironmentVariable("SimulationUsersTable");
+                string TrainingUserTable = Environment.GetEnvironmentVariable("TrainingUserTable");
 
                 // Step 1: Get Microsoft Graph Endpoints
                 var targetCloud = Environment.GetEnvironmentVariable("EnvironmentName");
@@ -103,9 +102,9 @@ namespace SimulationAttack_Dataverse
 
                 var simulationTasks = simulations
                     .Where(simulation =>
-                        simulation.Status == "running" || // still running
+                        simulation.Status == "running" || 
                         (simulation.CompletionDateTime.Value > lastRun &&
-                         simulation.CompletionDateTime.Value <= now)) // Last Five days of completion time
+                         simulation.CompletionDateTime.Value <= now)) 
                     .Select(simulation =>
                         WriteSimulationToDataverse(serviceClient, simulation, SimulationTable, _logger))
                     .ToList();
@@ -127,11 +126,21 @@ namespace SimulationAttack_Dataverse
 
                     if (sim.Status.Equals("succeeded", StringComparison.OrdinalIgnoreCase))
                     {
-                        return (!hasStatus || !syncStatus.Equals("Completed", StringComparison.OrdinalIgnoreCase)) &&
-                              // sim.CompletionDateTime.HasValue &&
-                              // sim.CompletionDateTime.Value >= startDate &&
-                               sim.CompletionDateTime.Value <= now;
+
+                        // Check if status is a timestamp within the last 24h
+                        var syncedWithin24Hours = false;
+                        if (DateTime.TryParse(syncStatus, out var lastSynced))
+                        {
+                            syncedWithin24Hours = (DateTime.UtcNow - lastSynced).TotalHours < 24;
+                        }
+
+                        return (!hasStatus ||                          
+                                !syncStatus.Equals("Completed", StringComparison.OrdinalIgnoreCase)) && 
+                                !syncedWithin24Hours &&                
+                                sim.CompletionDateTime.HasValue &&
+                                sim.CompletionDateTime.Value <= now;
                     }
+
 
                     if (sim.Status.Equals("running", StringComparison.OrdinalIgnoreCase))
                     {
@@ -140,7 +149,7 @@ namespace SimulationAttack_Dataverse
                         // Check if it's been more than 24h since last sync
                         if (DateTime.TryParse(syncStatus, out var lastSynced))
                         {
-                            return (DateTime.UtcNow - lastSynced).TotalHours >= 48;
+                            return (DateTime.UtcNow - lastSynced).TotalHours >= 24;
                         }
 
                         return true;
@@ -153,38 +162,7 @@ namespace SimulationAttack_Dataverse
                     }
 
                     return false;
-                }).Take(18).ToList();
-
-                // Use simulationsToSync instead of filteredByDate
-                //if (simulationsToSync?.Any() == true)
-                //{
-                //    foreach (var simulation in simulationsToSync)
-                //    {
-                //        try
-                //        {
-                //            var simulationUsersList = await GetSimulationUsers(graphBaseUrl, accessToken, simulation.Id, _logger);
-                //            //await AddUserCountToSimulation(serviceClient, simulation.Id, SimulationTable, simulationUsersList.Count, _logger);
-                //            _logger.LogInformation($"Updating simulation: {simulation.Id}");
-                //            foreach (var user in simulationUsersList)
-                //            {
-                //                try
-                //                {
-                //                    await WriteSimulationUsersToDataverse(serviceClient, user, SimulationUsersTable, simulation.Id, _logger);
-                //                }
-                //                catch (Exception ex)
-                //                {
-                //                    _logger.LogError(ex, $"Failed to write user for simulation {simulation.Id}");
-                //                }
-                //            }
-
-                //            await MarkSimulationAsProcessed(serviceClient, simulation.Id, SimulationTable, _logger, simulation.Status);
-                //        }
-                //        catch (Exception ex)
-                //        {
-                //            _logger.LogError(ex, $"Failed processing simulation {simulation.Id}");
-                //        }
-                //    }
-                //}
+                }).Take(6).ToList();
 
                 if (simulationsToSync?.Any() == true)
                 {
@@ -814,61 +792,6 @@ namespace SimulationAttack_Dataverse
                 throw new Exception($"Error writing to Dataverse: {ex.Message}");
             }
         }
-        private static async Task WriteSimulationUsersToDataverse(ServiceClient serviceClient,SimulationUsers SimulationUsers,string SimulationUsersTable,string id,ILogger logger)
-        {
-            try
-            {
-                var tableprefix = Environment.GetEnvironmentVariable("tableprefix", EnvironmentVariableTarget.Process);
-
-                var existingRecord = await RetrieveExistingRecordSimUser(
-                    serviceClient,
-                    SimulationUsersTable,
-                    $"{tableprefix}_simulationuser",
-                    JsonConvert.SerializeObject(SimulationUsers.simulationUser),
-                    $"{tableprefix}_simulationid",
-                    id);
-
-                if (existingRecord != null)
-                {
-                    var entityToUpdate = new Entity(SimulationUsersTable)
-                    {
-                        Id = existingRecord.Id,
-                        [$"{tableprefix}_iscompromised"] = SimulationUsers.isCompromised,
-                        [$"{tableprefix}_simulationid"] = id,
-                        [$"{tableprefix}_compromiseddatetime"] = SimulationUsers.compromisedDateTime ?? (DateTime?)null,
-                        [$"{tableprefix}_assignedtrainingscount"] = SimulationUsers.assignedTrainingsCount,
-                        [$"{tableprefix}_completedtrainingscount"] = SimulationUsers.completedTrainingsCount,
-                        [$"{tableprefix}_inprogresstrainingscount"] = SimulationUsers.inProgressTrainingsCount,
-                        [$"{tableprefix}_reportedphishdatetime"] = SimulationUsers.reportedPhishDateTime ?? (DateTime?)null,
-                        [$"{tableprefix}_simulationuser"] = JsonConvert.SerializeObject(SimulationUsers.simulationUser),
-                        [$"{tableprefix}_simulationevents"] = JsonConvert.SerializeObject(SimulationUsers.SimulationEvents),
-                    };
-
-                    await serviceClient.UpdateAsync(entityToUpdate);
-                }
-                else
-                {
-                    var entityToCreate = new Entity(SimulationUsersTable)
-                    {
-                        [$"{tableprefix}_iscompromised"] = SimulationUsers.isCompromised,
-                        [$"{tableprefix}_simulationid"] = id,
-                        [$"{tableprefix}_compromiseddatetime"] = SimulationUsers.compromisedDateTime ?? (DateTime?)null,
-                        [$"{tableprefix}_assignedtrainingscount"] = SimulationUsers.assignedTrainingsCount,
-                        [$"{tableprefix}_completedtrainingscount"] = SimulationUsers.completedTrainingsCount,
-                        [$"{tableprefix}_inprogresstrainingscount"] = SimulationUsers.inProgressTrainingsCount,
-                        [$"{tableprefix}_reportedphishdatetime"] = SimulationUsers.reportedPhishDateTime ?? (DateTime?)null,
-                        [$"{tableprefix}_simulationuser"] = JsonConvert.SerializeObject(SimulationUsers.simulationUser),
-                        [$"{tableprefix}_simulationevents"] = JsonConvert.SerializeObject(SimulationUsers.SimulationEvents),
-                    };
-
-                    await serviceClient.CreateAsync(entityToCreate);
-                }
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, $"Failed to write simulation user for Simulation ID {id} / User: {JsonConvert.SerializeObject(SimulationUsers.simulationUser)}");
-            }
-        }
 
         private static async Task WriteSimulationUsersBatchToDataverse(ServiceClient serviceClient,List<SimulationUsers> simulationUsersList,string SimulationUsersTable,string simulationId,ILogger logger)
         {
@@ -876,7 +799,8 @@ namespace SimulationAttack_Dataverse
             {
                 var tableprefix = Environment.GetEnvironmentVariable("tableprefix", EnvironmentVariableTarget.Process);
 
-                // 1. Pull existing records for this simulation
+                // 1. Pull existing records for this simulation WITH PAGING
+                var allRecords = new List<Entity>();
                 var query = new QueryExpression(SimulationUsersTable)
                 {
                     ColumnSet = new ColumnSet($"{tableprefix}_simulationuser"),
@@ -886,11 +810,28 @@ namespace SimulationAttack_Dataverse
                 {
                     new ConditionExpression($"{tableprefix}_simulationid", ConditionOperator.Equal, simulationId)
                 }
+                    },
+                    PageInfo = new PagingInfo
+                    {
+                        Count = 5000,
+                        PageNumber = 1
                     }
                 };
 
-                var existingRecords = serviceClient.RetrieveMultiple(query).Entities;
-                var existingDict = existingRecords.ToDictionary(
+                EntityCollection results;
+                do
+                {
+                    results = serviceClient.RetrieveMultiple(query);
+                    allRecords.AddRange(results.Entities);
+
+                    if (results.MoreRecords)
+                    {
+                        query.PageInfo.PageNumber++;
+                        query.PageInfo.PagingCookie = results.PagingCookie;
+                    }
+                } while (results.MoreRecords);
+
+                var existingDict = allRecords.ToDictionary(
                     e => e.GetAttributeValue<string>($"{tableprefix}_simulationuser"),
                     e => e.Id
                 );
@@ -971,69 +912,6 @@ namespace SimulationAttack_Dataverse
                 logger.LogError(ex, $"Batch write failed for simulation {simulationId}");
             }
         }
-
-
-        //private static async Task WriteSimulationUsersBatchToDataverse(ServiceClient serviceClient,List<SimulationUsers> simulationUsersList,string SimulationUsersTable,string simulationId,ILogger logger)
-        //{
-        //    try
-        //    {
-        //        var tableprefix = Environment.GetEnvironmentVariable("tableprefix", EnvironmentVariableTarget.Process);
-
-        //        var batch = new ExecuteMultipleRequest
-        //        {
-        //            Requests = new OrganizationRequestCollection(),
-        //            Settings = new ExecuteMultipleSettings
-        //            {
-        //                ContinueOnError = true,
-        //                ReturnResponses = false
-        //            }
-        //        };
-
-        //        foreach (var user in simulationUsersList)
-        //        {
-        //            var entity = new Entity(SimulationUsersTable)
-        //            {
-        //                // upsert based on alternate key (simulationId + simulationUser)
-        //                [$"{tableprefix}_simulationid"] = simulationId,
-        //                [$"{tableprefix}_simulationuser"] = JsonConvert.SerializeObject(user.simulationUser),
-        //                [$"{tableprefix}_iscompromised"] = user.isCompromised,
-        //                [$"{tableprefix}_compromiseddatetime"] = user.compromisedDateTime ?? (DateTime?)null,
-        //                [$"{tableprefix}_assignedtrainingscount"] = user.assignedTrainingsCount,
-        //                [$"{tableprefix}_completedtrainingscount"] = user.completedTrainingsCount,
-        //                [$"{tableprefix}_inprogresstrainingscount"] = user.inProgressTrainingsCount,
-        //                [$"{tableprefix}_reportedphishdatetime"] = user.reportedPhishDateTime ?? (DateTime?)null,
-        //                [$"{tableprefix}_simulationevents"] = JsonConvert.SerializeObject(user.SimulationEvents),
-        //            };
-
-        //            // Use UpsertRequest instead of Create/Update
-        //            var upsertRequest = new UpsertRequest
-        //            {
-        //                Target = entity
-        //            };
-
-        //            batch.Requests.Add(upsertRequest);
-
-        //            // Optional: flush batch every 500 records to avoid hitting size limits
-        //            if (batch.Requests.Count >= 500)
-        //            {
-        //                await serviceClient.ExecuteAsync(batch);
-        //                logger.LogInformation($"Committed batch of {batch.Requests.Count} simulation users for simulation {simulationId}");
-        //                batch.Requests.Clear();
-        //            }
-        //        }
-
-        //        // Commit any remaining records
-        //        if (batch.Requests.Count > 0)
-        //        {
-        //            await serviceClient.ExecuteAsync(batch);
-        //            logger.LogInformation($"Committed final batch of {batch.Requests.Count} simulation users for simulation {simulationId}");
-        //        }
-        //    }
-        //    catch (Exception ex)
-        //    {
-        //        logger.LogError(ex, $"Batch upsert failed for simulation {simulationId}");
-        //    }
-        //}
 
         private static async Task WriteTrainingUserCoverageToDataverse(ServiceClient serviceClient, TrainingUserCoverage TrainingUsers, string TrainingUserTable, ILogger logger)
         {
